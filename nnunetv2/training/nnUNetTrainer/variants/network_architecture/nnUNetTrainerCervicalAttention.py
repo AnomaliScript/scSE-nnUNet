@@ -1,5 +1,3 @@
-# Custom trainer that uses cervical attention U-Net
-
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
 from torch import nn
@@ -7,14 +5,13 @@ from typing import Union, List, Tuple
 import sys
 from pathlib import Path
 
-# Import attention modules ONLY
 sys.path.append(str(Path(__file__).parent))
 from scse_modules import CervicalLevelAwareAttention3D
 
 
 class nnUNetTrainerCervicalAttention(nnUNetTrainer):
     """
-    Trainer using PlainConvUNet + Cervical Attention
+    Trainer using PlainConvUNet + Cervical Attention in skip connections
     """
     
     @staticmethod
@@ -25,9 +22,9 @@ class nnUNetTrainerCervicalAttention(nnUNetTrainer):
                                    num_output_channels: int,
                                    enable_deep_supervision: bool = True) -> nn.Module:
         """
-        Build network with cervical attention added to skip connections
+        Build network with cervical attention in skip connections
         """
-        # Build the base network from plans
+        # Build base network
         network = get_network_from_plans(
             architecture_class_name,
             arch_init_kwargs,
@@ -40,13 +37,12 @@ class nnUNetTrainerCervicalAttention(nnUNetTrainer):
         
         print("🎯 Adding cervical attention to skip connections...")
         
-        # Add attention modules
+        # Create attention modules for each skip connection
         n_stages = len(network.encoder.stages)
-        attention_modules = nn.ModuleList()
-        
         features_per_stage = arch_init_kwargs.get('features_per_stage', [])
         
-        for i in range(n_stages - 1):
+        attention_modules = nn.ModuleList()
+        for i in range(n_stages - 1):  # No skip from bottleneck
             try:
                 num_channels = features_per_stage[i] if i < len(features_per_stage) else 32 * (2 ** i)
                 attention = CervicalLevelAwareAttention3D(num_channels, reduction_ratio=2)
@@ -56,27 +52,34 @@ class nnUNetTrainerCervicalAttention(nnUNetTrainer):
                 print(f"  ⚠️ Stage {i}: Failed - {e}")
                 attention_modules.append(None)
         
+        # Store attention modules
         network.attention_modules = attention_modules
         
-        # Wrap encoder forward to apply attention
-        def encoder_forward_with_attention(x):
-            skips = []
-            for s in network.encoder.stages:
-                x = s(x)
-                skips.append(x)
-            
+        # CORRECTED: Wrap DECODER forward, not encoder!
+        original_decoder_forward = network.decoder.forward
+        
+        def decoder_forward_with_attention(skips):
+            """
+            Apply attention to skips before decoder processes them
+            skips: List of encoder outputs
+            """
             attended_skips = []
-            for i, skip in enumerate(skips):
+            for i, skip in enumerate(skips[:-1]):  # All except bottleneck
                 if i < len(network.attention_modules) and network.attention_modules[i] is not None:
                     attended_skip, _ = network.attention_modules[i](skip)
                     attended_skips.append(attended_skip)
                 else:
                     attended_skips.append(skip)
             
-            return attended_skips
+            # Add bottleneck (last skip) without attention
+            attended_skips.append(skips[-1])
+            
+            # Call original decoder with attended skips
+            return original_decoder_forward(attended_skips)
         
-        network.encoder.forward = encoder_forward_with_attention
+        # Replace decoder forward
+        network.decoder.forward = decoder_forward_with_attention
         
-        print("PlainConv + Cervical Attention network built!")
+        print("✅ PlainConv + Cervical Attention network built!")
         
         return network
