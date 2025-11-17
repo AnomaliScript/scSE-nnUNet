@@ -10,10 +10,10 @@ from pathlib import Path
 
 # Import our custom U-Net
 sys.path.append(str(Path(__file__).parent))
-from cervical_unet import PlainConvUNetWithAttention
+from cervical_residual_unet import ResidualEncoderUNetWithAttention
 
 
-class nnUNetTrainerCervicalAttention(nnUNetTrainer):
+class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
     # Trainer using cervical level-aware attention in skip connections (versus happening in encoding or decoding)
     
     @staticmethod
@@ -34,7 +34,7 @@ class nnUNetTrainerCervicalAttention(nnUNetTrainer):
         norm_op = nn.InstanceNorm2d if dim == 2 else nn.InstanceNorm3d
         
         # Build network with attention
-        model = PlainConvUNetWithAttention(
+        model = ResidualEncoderUNetWithAttention(
             input_channels=num_input_channels,
             n_stages=num_stages,
             features_per_stage=[min(configuration_manager.UNet_base_num_features * 2 ** i,
