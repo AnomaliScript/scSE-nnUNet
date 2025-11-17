@@ -13,7 +13,7 @@ This project is based on [nnU-Net](https://github.com/MIC-DKFZ/nnUNet) by Fabian
 ## License
 This project maintains the original Apache 2.0 License from nnUNet. See LICENSE file.
 
-Modifications and additions © 2024 [Your Name]
+Modifications and additions © 2025 Brandon Kim
 
 ## Citation
 If you use this work, please cite both:
