@@ -22,7 +22,7 @@ If you use this work, please cite both:
 
 
 
-### v1.1: Cervical Level-Aware Attention with Soft Weighting
+# v1.1: Cervical Level-Aware Attention with Soft Weighting
 
 #### Context
 
