@@ -298,6 +298,28 @@ class nnUNetDatasetBlosc2(nnUNetBaseDataset):
         return tuple(block_size), tuple(chunk_size)
 
 
+class nnUNetDatasetWithYOLOAttention(nnUNetDatasetNumpy):
+    """
+    Extended dataset that loads YOLO attention masks alongside data.
+
+    If YOLO mask doesn't exist, it will NOT generate it (that's done in trainer).
+    Just loads if available, returns None if not.
+    """
+
+    def load_case(self, identifier):
+        # Load standard data
+        data, seg, seg_prev, properties = super().load_case(identifier)
+
+        # Try to load YOLO attention mask
+        yolo_file = join(self.source_folder, identifier + '_yolo_attention.npz')
+        if isfile(yolo_file):
+            yolo_attention = np.load(yolo_file)['attention']
+        else:
+            yolo_attention = None
+
+        return data, seg, seg_prev, properties, yolo_attention
+
+
 file_ending_dataset_mapping = {
     'npz': nnUNetDatasetNumpy,
     'b2nd': nnUNetDatasetBlosc2
