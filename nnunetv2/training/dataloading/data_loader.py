@@ -218,6 +218,135 @@ class nnUNetDataLoader(DataLoader):
         return {'data': data_all, 'target': seg_all, 'keys': selected_keys}
 
 
+class nnUNetDataLoaderWithYOLO(nnUNetDataLoader):
+    """
+    Extended dataloader that handles YOLO attention masks.
+
+    Crops YOLO masks using the same bounding boxes as data/segmentation,
+    ensuring spatial correspondence is maintained.
+    """
+
+    def generate_train_batch(self):
+        selected_keys = self.get_indices()
+        # preallocate memory for data and seg
+        data_all = np.zeros(self.data_shape, dtype=np.float32)
+        seg_all = np.zeros(self.seg_shape, dtype=np.int16)
+
+        # Check if dataset returns YOLO masks by testing first load
+        first_case = self._data.load_case(selected_keys[0])
+        has_yolo = len(first_case) == 5
+
+        # Preallocate YOLO mask array if needed
+        if has_yolo:
+            # Check if new 4-channel format or legacy format
+            _, _, _, _, test_yolo = first_case
+            if test_yolo.ndim == 4:
+                # New format: (4, D, H, W) confidence-weighted
+                yolo_shape = (self.batch_size, 4, *self.patch_size)
+                yolo_all = np.zeros(yolo_shape, dtype=np.float32)
+            else:
+                # Legacy format: (D, H, W) discrete
+                yolo_shape = (self.batch_size, *self.patch_size)
+                yolo_all = np.zeros(yolo_shape, dtype=np.uint8)
+
+        for j, i in enumerate(selected_keys):
+            # oversampling foreground will improve stability of model training
+            force_fg = self.get_do_oversample(j)
+
+            case_data = self._data.load_case(i)
+
+            # Unpack based on whether YOLO mask is present
+            if has_yolo:
+                data, seg, seg_prev, properties, yolo_attention = case_data
+            else:
+                data, seg, seg_prev, properties = case_data
+                yolo_attention = None
+
+            shape = data.shape[1:]
+
+            bbox_lbs, bbox_ubs = self.get_bbox(shape, force_fg, properties['class_locations'])
+            bbox = [[i, j] for i, j in zip(bbox_lbs, bbox_ubs)]
+
+            # Crop data and seg (same as parent class)
+            data_all[j] = crop_and_pad_nd(data, bbox, 0)
+
+            seg_cropped = crop_and_pad_nd(seg, bbox, -1)
+            if seg_prev is not None:
+                seg_cropped = np.vstack((seg_cropped, crop_and_pad_nd(seg_prev, bbox, -1)[None]))
+            seg_all[j] = seg_cropped
+
+            # Crop YOLO mask with same bbox
+            if yolo_attention is not None:
+                if yolo_attention.ndim == 4:
+                    # New format: (4, D, H, W) - crop each channel
+                    yolo_cropped = crop_and_pad_nd(yolo_attention, bbox, 0)
+                else:
+                    # Legacy format: (D, H, W) - add/remove channel dimension
+                    yolo_cropped = crop_and_pad_nd(yolo_attention[None], bbox, 0)[0]
+                yolo_all[j] = yolo_cropped
+
+        # Handle 2D case
+        if self.patch_size_was_2d:
+            data_all = data_all[:, :, 0]
+            seg_all = seg_all[:, :, 0]
+            if has_yolo:
+                if yolo_all.ndim == 5:
+                    # New format: (B, 4, D, H, W) -> (B, 4, H, W)
+                    yolo_all = yolo_all[:, :, 0]
+                else:
+                    # Legacy format: (B, D, H, W) -> (B, H, W)
+                    yolo_all = yolo_all[:, 0]
+
+        # Apply transforms
+        if self.transforms is not None:
+            with torch.no_grad():
+                with threadpool_limits(limits=1, user_api=None):
+                    data_all = torch.from_numpy(data_all).float()
+                    seg_all = torch.from_numpy(seg_all).to(torch.int16)
+
+                    if has_yolo:
+                        yolo_all = torch.from_numpy(yolo_all).to(torch.uint8)
+
+                    images = []
+                    segs = []
+                    yolo_masks = [] if has_yolo else None
+
+                    for b in range(self.batch_size):
+                        # Apply transforms to image and segmentation
+                        tmp = self.transforms(**{'image': data_all[b], 'segmentation': seg_all[b]})
+                        images.append(tmp['image'])
+                        segs.append(tmp['segmentation'])
+
+                        # Apply same spatial transforms to YOLO mask
+                        if has_yolo:
+                            # Treat YOLO mask like segmentation for transforms
+                            yolo_tmp = self.transforms(**{'image': data_all[b], 'segmentation': yolo_all[b]})
+                            yolo_masks.append(yolo_tmp['segmentation'])
+
+                    data_all = torch.stack(images)
+                    if isinstance(segs[0], list):
+                        seg_all = [torch.stack([s[i] for s in segs]) for i in range(len(segs[0]))]
+                    else:
+                        seg_all = torch.stack(segs)
+
+                    if has_yolo:
+                        yolo_all = torch.stack(yolo_masks)
+
+                    del segs, images
+                    if yolo_masks:
+                        del yolo_masks
+
+            result = {'data': data_all, 'target': seg_all, 'keys': selected_keys}
+            if has_yolo:
+                result['yolo_attention'] = yolo_all
+            return result
+
+        result = {'data': data_all, 'target': seg_all, 'keys': selected_keys}
+        if has_yolo:
+            result['yolo_attention'] = yolo_all
+        return result
+
+
 if __name__ == '__main__':
     folder = join(nnUNet_preprocessed, 'Dataset002_Heart', 'nnUNetPlans_3d_fullres')
     ds = nnUNetDatasetBlosc2(folder)  # this should not load the properties!

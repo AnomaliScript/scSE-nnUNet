@@ -1,13 +1,19 @@
 """
- nnU-Net Trainer with Cervical Level-Aware Attention
+nnU-Net Trainer with Cervical Level-Aware Attention (Bottleneck + Decoder)
 
 Custom trainer that integrates anatomically-informed attention mechanisms into
 nnU-Net's ResidualEncoderUNet architecture for cervical spine segmentation.
 
 Key modifications:
-1. Adds DetectorGuidedCervicalAttention3D modules to skip connections
-2. Applies YOLO-guided attention to encoder outputs before passing to decoder
-3. Maintains compatibility with nnU-Net's training pipeline
+1. Adds DetectorGuidedCervicalAttention3D to bottleneck (deepest encoder layer)
+2. Adds DetectorGuidedCervicalAttention3D to all decoder blocks (boundary refinement)
+3. Skip connections remain UNCHANGED for direct gradient flow
+4. Uses YOLO vertebra detector to spatially route attention by cervical level:
+   - C1: Spatial attention only (ring structure)
+   - C2: Enhanced scSE (odontoid process)
+   - C3-C7: Standard scSE
+5. Class-weighted loss: 2x penalty for C6/C7 errors
+6. Maintains full compatibility with nnU-Net's training pipeline
 
 Author: Brandon K (@AnomaliScript)
 Date: 2025
@@ -16,6 +22,7 @@ Date: 2025
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
 from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetWithYOLOAttention
+from nnunetv2.training.dataloading.data_loader import nnUNetDataLoaderWithYOLO
 from torch import nn
 from typing import Union, List, Tuple
 import sys
@@ -41,7 +48,9 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.yolo_model_path = 'runs/vertebra_detector_114/weights/best.pt'
+        # Path to YOLO model relative to nnunetv2/
+        nnunetv2_root = Path(__file__).resolve().parents[4]  # Navigate up to nnunetv2/
+        self.yolo_model_path = str(nnunetv2_root / 'yolo_models' / 'vertebra_detector_114.pt')
 
     def initialize(self):
         """Override to pre-generate YOLO masks before training"""
@@ -65,6 +74,11 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         # Get preprocessed data folder
         preprocessed_folder = self.preprocessed_dataset_folder
 
+        # Create yolo_bbox as sibling to nnUNetPlans_3d_fullres
+        yolo_folder = join(self.preprocessed_dataset_folder_base, 'yolo_bbox')
+        from batchgenerators.utilities.file_and_folder_operations import maybe_mkdir_p
+        maybe_mkdir_p(yolo_folder)
+
         # Get all case identifiers
         from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetNumpy
         identifiers = nnUNetDatasetNumpy.get_identifiers(preprocessed_folder)
@@ -72,17 +86,19 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         # Check which cases are missing YOLO masks
         missing_masks = []
         for identifier in identifiers:
-            yolo_file = join(preprocessed_folder, identifier + '_yolo_attention.npz')
+            yolo_file = join(yolo_folder, identifier + '_yolo_attention.npz')
             if not isfile(yolo_file):
                 missing_masks.append(identifier)
 
         if not missing_masks:
             print(f"✅ All {len(identifiers)} cases already have YOLO masks!")
+            print(f"📁 Stored in: {yolo_folder}")
             print("=" * 70 + "\n")
             return
 
         print(f"Found {len(missing_masks)}/{len(identifiers)} cases without YOLO masks")
         print(f"Generating masks now (using {self.yolo_model_path})...")
+        print(f"📁 Saving to: {yolo_folder}")
         print("This is a ONE-TIME process. Future training runs will be fast.\n")
 
         # Generate masks for missing cases
@@ -99,8 +115,8 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
                     conf_threshold=0.25
                 )
 
-                # Save mask
-                yolo_file = join(preprocessed_folder, identifier + '_yolo_attention.npz')
+                # Save mask in yolo_bbox subfolder
+                yolo_file = join(yolo_folder, identifier + '_yolo_attention.npz')
                 np.savez_compressed(yolo_file, attention=attention_mask)
 
             except Exception as e:
@@ -108,6 +124,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
                 continue
 
         print(f"\n✅ All YOLO masks generated and saved!")
+        print(f"📁 Location: {yolo_folder}")
         print("=" * 70 + "\n")
 
     def get_tr_and_val_datasets(self):
@@ -129,6 +146,115 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         )
 
         return dataset_tr, dataset_val
+
+    def get_dataloaders(self):
+        """Override to use custom YOLO-aware dataloader"""
+        # Get the parent's transforms and configurations
+        if self.dataset_class is None:
+            from nnunetv2.training.dataloading.nnunet_dataset import infer_dataset_class
+            self.dataset_class = infer_dataset_class(self.preprocessed_dataset_folder)
+
+        patch_size = self.configuration_manager.patch_size
+        deep_supervision_scales = self._get_deep_supervision_scales()
+
+        (
+            rotation_for_DA,
+            do_dummy_2d_data_aug,
+            initial_patch_size,
+            mirror_axes,
+        ) = self.configure_rotation_dummyDA_mirroring_and_inital_patch_size()
+
+        # Training transforms
+        tr_transforms = self.get_training_transforms(
+            patch_size, rotation_for_DA, deep_supervision_scales, mirror_axes, do_dummy_2d_data_aug,
+            use_mask_for_norm=self.configuration_manager.use_mask_for_norm,
+            is_cascaded=self.is_cascaded, foreground_labels=self.label_manager.foreground_labels,
+            regions=self.label_manager.foreground_regions if self.label_manager.has_regions else None,
+            ignore_label=self.label_manager.ignore_label)
+
+        # Validation transforms
+        val_transforms = self.get_validation_transforms(deep_supervision_scales,
+                                                        is_cascaded=self.is_cascaded,
+                                                        foreground_labels=self.label_manager.foreground_labels,
+                                                        regions=self.label_manager.foreground_regions if
+                                                        self.label_manager.has_regions else None,
+                                                        ignore_label=self.label_manager.ignore_label)
+
+        dataset_tr, dataset_val = self.get_tr_and_val_datasets()
+
+        # Use custom YOLO-aware dataloader
+        dl_tr = nnUNetDataLoaderWithYOLO(dataset_tr, self.batch_size,
+                                         initial_patch_size,
+                                         self.configuration_manager.patch_size,
+                                         self.label_manager,
+                                         oversample_foreground_percent=self.oversample_foreground_percent,
+                                         sampling_probabilities=None, pad_sides=None, transforms=tr_transforms,
+                                         probabilistic_oversampling=self.probabilistic_oversampling)
+
+        dl_val = nnUNetDataLoaderWithYOLO(dataset_val, self.batch_size,
+                                          self.configuration_manager.patch_size,
+                                          self.configuration_manager.patch_size,
+                                          self.label_manager,
+                                          oversample_foreground_percent=self.oversample_foreground_percent,
+                                          sampling_probabilities=None, pad_sides=None, transforms=val_transforms,
+                                          probabilistic_oversampling=self.probabilistic_oversampling)
+
+        return dl_tr, dl_val
+
+    def _build_loss(self):
+        """
+        Override to add class-weighted loss that penalizes C6/C7 errors more.
+
+        Class weights:
+        - Background (0): 1.0 (standard)
+        - C1-C5 (1-5): 1.0 (standard)
+        - C6 (6): 2.0 (2x penalty for errors)
+        - C7 (7): 2.0 (2x penalty for errors)
+
+        This helps the model focus on the most challenging vertebrae (C6/C7)
+        which are often harder to segment due to proximity and anatomical variation.
+        """
+        from nnunetv2.training.loss.dice import MemoryEfficientSoftDiceLoss
+        from nnunetv2.training.loss.compound_losses import DC_and_CE_loss
+        from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
+        import torch
+
+        # Create class weights: penalize C6/C7 (indices 6 and 7) errors more
+        # num_classes = 8 (background + C1-C7)
+        num_classes = len(self.label_manager.foreground_labels) + 1  # +1 for background
+
+        class_weights = torch.ones(num_classes, dtype=torch.float32)
+        class_weights[6] = 2.0  # C6: 2x weight
+        class_weights[7] = 2.0  # C7: 2x weight
+
+        print(f"\n🎯 Class-weighted loss configured:")
+        print(f"   C1-C5: 1.0x weight (standard)")
+        print(f"   C6-C7: 2.0x weight (prioritized)")
+
+        # Build DC + CE loss with class weights for CE component
+        loss = DC_and_CE_loss(
+            {'batch_dice': self.configuration_manager.batch_dice,
+             'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp},
+            {'weight': class_weights},  # Add class weights to CE loss
+            weight_ce=1,
+            weight_dice=1,
+            ignore_label=self.label_manager.ignore_label,
+            dice_class=MemoryEfficientSoftDiceLoss
+        )
+
+        if self._do_i_compile():
+            loss.dc = torch.compile(loss.dc)
+
+        # Deep supervision weights
+        if self.enable_deep_supervision:
+            deep_supervision_scales = self._get_deep_supervision_scales()
+            weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
+            if self.is_ddp and self.batch_size == 1:
+                weights[-1] = 0
+            weights = weights / weights.sum()
+            loss = DeepSupervisionWrapper(loss, weights)
+
+        return loss
 
     def train_step(self, batch: dict) -> dict:
         """
@@ -157,10 +283,13 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
                                    num_output_channels: int,
                                    enable_deep_supervision: bool = True) -> nn.Module:
         """
-        Build network architecture with integrated cervical attention.
+        Build network architecture with cervical attention in BOTTLENECK + DECODER.
 
-        Overrides the base class method to add attention modules to skip connections
-        while maintaining full compatibility with nnU-Net's planning and configuration.
+        Applies anatomically-informed scSE attention at:
+        1. Bottleneck (deepest encoder layer) - refine most abstract features
+        2. Decoder blocks (after upsampling + concatenation) - boundary refinement
+
+        Skip connections are left UNCHANGED for direct gradient flow.
 
         Args:
             architecture_class_name: Fully qualified class name (e.g., "dynamic_network_architectures.architectures.unet.ResidualEncoderUNet")
@@ -171,7 +300,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             enable_deep_supervision: Whether to use deep supervision
 
         Returns:
-            Modified network with attention modules integrated into skip connections
+            Modified network with bottleneck + decoder attention
         """
         # Step 1: Build base network using nnU-Net's standard method
         network = get_network_from_plans(
@@ -184,47 +313,74 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             deep_supervision=enable_deep_supervision
         )
 
-        print("🎯 Building ResidualEncoderUNet with Cervical Level-Aware Attention...")
+        print("🎯 Building ResidualEncoderUNet with Bottleneck + Decoder Cervical Attention...")
 
-        # Step 2: Create attention modules for each encoder stage
+        # Step 2: Create attention modules for BOTTLENECK and DECODER blocks
         n_stages = len(network.encoder.stages)
+        n_decoder_stages = len(network.decoder.stages)
         features_per_stage = arch_init_kwargs.get('features_per_stage', [])
 
-        attention_modules = nn.ModuleList()
+        # Bottleneck attention (deepest encoder layer)
+        print("\n📌 BOTTLENECK ATTENTION:")
+        try:
+            # Bottleneck is the last encoder stage
+            bottleneck_channels = features_per_stage[-1] if len(features_per_stage) > 0 else 320
+            bottleneck_attention = DetectorGuidedCervicalAttention3D(
+                num_channels=bottleneck_channels,
+                reduction_ratio=2
+            )
+            print(f"  ✅ Bottleneck: {bottleneck_channels} channels")
+        except Exception as e:
+            print(f"  ⚠️ Bottleneck: Failed - {e}")
+            bottleneck_attention = None
 
-        # Add attention for each skip connection (all stages except bottleneck)
-        for i in range(n_stages - 1):
+        # Decoder block attention (after concatenation + conv)
+        decoder_attention_modules = nn.ModuleList()
+
+        print("\n📌 DECODER BLOCK ATTENTION:")
+        for s in range(n_decoder_stages):
             try:
-                # Get number of channels at this stage
-                if i < len(features_per_stage):
-                    num_channels = features_per_stage[i]
-                else:
-                    # Fallback: assume doubling pattern
-                    num_channels = 32 * (2 ** i)
+                decoder_stage = network.decoder.stages[s]
 
-                # Create YOLO-guided attention module
+                # Get output channels from the last conv in this decoder stage
+                if hasattr(decoder_stage, 'blocks') and len(decoder_stage.blocks) > 0:
+                    last_block = decoder_stage.blocks[-1]
+                    if hasattr(last_block, 'conv') and hasattr(last_block.conv, 'out_channels'):
+                        num_channels = last_block.conv.out_channels
+                    else:
+                        # Fallback: use features_per_stage in reverse
+                        encoder_stage_idx = n_stages - 2 - s
+                        num_channels = features_per_stage[encoder_stage_idx] if encoder_stage_idx >= 0 else 32
+                else:
+                    encoder_stage_idx = n_stages - 2 - s
+                    num_channels = features_per_stage[encoder_stage_idx] if encoder_stage_idx >= 0 else 32
+
                 attention = DetectorGuidedCervicalAttention3D(
                     num_channels=num_channels,
                     reduction_ratio=2
                 )
-                attention_modules.append(attention)
-
-                print(f"  ✅ Stage {i}: Added attention module ({num_channels} channels)")
+                decoder_attention_modules.append(attention)
+                print(f"  ✅ Decoder {s}: {num_channels} channels")
 
             except Exception as e:
-                print(f"  ⚠️ Stage {i}: Failed to add attention - {e}")
-                attention_modules.append(None)
+                print(f"  ⚠️ Decoder {s}: Failed - {e}")
+                decoder_attention_modules.append(None)
 
         # Step 3: Attach attention modules and mask placeholder to network
-        network.attention_modules = attention_modules
-        network.current_attention_mask = None  # Will be set during forward pass
+        network.bottleneck_attention = bottleneck_attention
+        network.decoder_attention_modules = decoder_attention_modules
+        network.current_attention_mask = None
 
-        # Step 4: Modify decoder to apply attention to skip connections
+        # Step 4: Modify decoder to apply bottleneck + decoder attention
         original_decoder_forward = network.decoder.forward
+        import torch
 
-        def decoder_forward_with_attention(skips):
+        def decoder_forward_with_bottleneck_decoder_attention(skips):
             """
-            Modified decoder forward pass that applies YOLO-guided attention to skip connections.
+            Modified decoder with bottleneck + decoder attention:
+            1. Apply attention to bottleneck (deepest features)
+            2. Apply attention to each decoder block (boundary refinement)
+            3. Skip connections pass through UNCHANGED
 
             Args:
                 skips: List of encoder outputs [stage0, stage1, ..., bottleneck]
@@ -232,32 +388,57 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             Returns:
                 Decoder output (segmentation logits)
             """
-            # Get attention mask from network attribute (set during forward pass)
             attention_mask = getattr(network, 'current_attention_mask', None)
 
-            attended_skips = []
+            # PHASE 1: Apply attention to BOTTLENECK only
+            bottleneck = skips[-1]
+            if network.bottleneck_attention is not None:
+                bottleneck, _ = network.bottleneck_attention(bottleneck, attention_mask=attention_mask)
 
-            # Apply attention to all skips except bottleneck
-            for i, skip in enumerate(skips[:-1]):
-                if i < len(network.attention_modules) and network.attention_modules[i] is not None:
-                    # Apply YOLO-guided attention with mask
-                    attended_skip, _ = network.attention_modules[i](skip, attention_mask=attention_mask)
-                    attended_skips.append(attended_skip)
-                else:
-                    # No attention for this stage (fallback)
-                    attended_skips.append(skip)
+            # Skip connections pass through unchanged
+            modified_skips = skips[:-1] + [bottleneck]
 
-            # Add bottleneck without attention
-            attended_skips.append(skips[-1])
+            # PHASE 2: Decoder forward with attention on decoder blocks
+            lres_input = modified_skips[-1]
+            seg_outputs = []
 
-            # Pass attended skips to original decoder
-            return original_decoder_forward(attended_skips)
+            for s in range(len(network.decoder.stages)):
+                # Upsample
+                x = network.decoder.transpconvs[s](lres_input)
+
+                # Concatenate with skip (unmodified)
+                x = torch.cat((x, modified_skips[-(s+2)]), 1)
+
+                # Decoder convolution block
+                x = network.decoder.stages[s](x)
+
+                # APPLY DECODER ATTENTION
+                if s < len(network.decoder_attention_modules) and network.decoder_attention_modules[s] is not None:
+                    x, _ = network.decoder_attention_modules[s](x, attention_mask=attention_mask)
+
+                # Deep supervision
+                if network.decoder.deep_supervision:
+                    seg_outputs.append(network.decoder.seg_layers[s](x))
+                elif s == (len(network.decoder.stages) - 1):
+                    seg_outputs.append(network.decoder.seg_layers[-1](x))
+
+                lres_input = x
+
+            # Invert seg outputs (largest first)
+            seg_outputs = seg_outputs[::-1]
+
+            if not network.decoder.deep_supervision:
+                return seg_outputs[0]
+            else:
+                return seg_outputs
 
         # Replace decoder's forward method
-        network.decoder.forward = decoder_forward_with_attention
+        network.decoder.forward = decoder_forward_with_bottleneck_decoder_attention
 
-        print("✅ Cervical Level-Aware Attention integration complete!")
-        print(f"   Total attention modules: {len(attention_modules)}")
+        print("\n✅ Bottleneck + Decoder Cervical Attention integration complete!")
+        print(f"   Bottleneck attention: {'✓' if bottleneck_attention else '✗'}")
+        print(f"   Decoder attention modules: {len(decoder_attention_modules)}")
+        print(f"   Skip connections: UNCHANGED (direct gradient flow)")
         print(f"   Architecture: {architecture_class_name.split('.')[-1]}")
 
         return network

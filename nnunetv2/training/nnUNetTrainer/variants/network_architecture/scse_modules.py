@@ -24,22 +24,23 @@ from typing import Dict, List, Tuple
 # ============================================================================
 
 def generate_yolo_attention_mask(
+    # dw, volume_3d doesn't get changed
     volume_3d: np.ndarray,
-    yolo_model_path: str = 'runs/vertebra_detector_114/weights/best.pt',
+    yolo_model_path: str = None,
     conf_threshold: float = 0.25
 ) -> np.ndarray:
     """
-    Generate 3D attention mask from preprocessed volume using YOLO detector.
+    Generate confidence-weighted 3D attention mask from preprocessed volume using YOLO detector.
 
     This function:
     1. Takes a 3D volume (preprocessed by nnUNet)
     2. Runs YOLO detection slice-by-slice
-    3. Aggregates 2D detections into 3D bounding boxes
-    4. Creates a 3D mask with values:
-       - 0: background (no vertebra)
-       - 1: C1 regions (spatial attention)
-       - 2: C2 regions (enhanced scSE)
-       - 3: C3-C7 regions (standard scSE)
+    3. Aggregates 2D detections into 3D bounding boxes with confidence scores
+    4. Creates a 4-channel confidence-weighted mask:
+       - Channel 0: C1 regions (weighted by YOLO confidence)
+       - Channel 1: C2 regions (weighted by YOLO confidence)
+       - Channel 2: C3-C7 regions (weighted by YOLO confidence)
+       - Channel 3: Background (1.0 where no vertebra detected)
 
     Args:
         volume_3d: Preprocessed 3D volume, shape (C, D, H, W) or (D, H, W)
@@ -47,9 +48,17 @@ def generate_yolo_attention_mask(
         conf_threshold: Detection confidence threshold
 
     Returns:
-        attention_mask: 3D array same spatial shape as volume, dtype uint8
+        attention_mask: 4D array shape (4, D, H, W), dtype float32, normalized so channels sum to 1.0
     """
     from ultralytics import YOLO
+    from pathlib import Path
+
+    # Validate YOLO model path
+    if yolo_model_path is None:
+        raise ValueError("yolo_model_path must be provided")
+
+    if not Path(yolo_model_path).exists():
+        raise FileNotFoundError(f"YOLO model not found at: {yolo_model_path}")
 
     # Handle channel dimension
     if volume_3d.ndim == 4:
@@ -166,10 +175,14 @@ def aggregate_detections_to_3d(
         z_min = int(max(0, z_min))
         z_max = int(min(D, z_max))
 
+        # Average confidence across all detections for this vertebra
+        avg_confidence = np.mean([d['confidence'] for d in detections])
+
         vertebrae_3d[vert_name] = {
             'bbox': [x1, x2, y1, y2, z_min, z_max],
             'slices': slices,
-            'num_detections': len(detections)
+            'num_detections': len(detections),
+            'confidence': float(avg_confidence)
         }
 
     return vertebrae_3d
@@ -180,49 +193,60 @@ def create_attention_mask_from_vertebrae(
     volume_shape: Tuple[int, int, int]
 ) -> np.ndarray:
     """
-    Create 3D attention mask from vertebra bounding boxes.
+    Create confidence-weighted 3D attention mask from vertebra bounding boxes.
 
-    Mask values:
-    - 0: background
-    - 1: C1 regions (spatial attention)
-    - 2: C2 regions (enhanced scSE)
-    - 3: C3-C7 regions (standard scSE)
+    Returns 4-channel mask where each channel is weighted by YOLO confidence:
+    - Channel 0: C1 regions (confidence-weighted)
+    - Channel 1: C2 regions (confidence-weighted)
+    - Channel 2: C3-C7 regions (confidence-weighted)
+    - Channel 3: Background (1.0 where no vertebra detected)
 
     Args:
-        vertebrae_3d: Dict mapping vertebra name -> {'bbox': [x1, x2, y1, y2, z1, z2]}
+        vertebrae_3d: Dict mapping vertebra name -> {'bbox': [...], 'confidence': float}
         volume_shape: (D, H, W)
 
     Returns:
-        attention_mask: 3D array, dtype uint8
+        attention_mask: 4D array (4, D, H, W), dtype float32
     """
     D, H, W = volume_shape
-    attention_mask = np.zeros((D, H, W), dtype=np.uint8)
+    # 4 channels: [C1, C2, C3-C7, Background]
+    attention_mask = np.zeros((4, D, H, W), dtype=np.float32)
 
     for vert_name, vert_data in vertebrae_3d.items():
         x1, x2, y1, y2, z1, z2 = vert_data['bbox']
+        confidence = vert_data['confidence']
 
-        # Determine attention group
+        # Determine attention channel
         if vert_name == 'C1':
-            mask_value = 1
+            channel_idx = 0
         elif vert_name == 'C2':
-            mask_value = 2
+            channel_idx = 1
         else:  # C3, C4, C5, C6, C7
-            mask_value = 3
+            channel_idx = 2
 
-        # Fill this 3D region with the appropriate mask value
-        attention_mask[z1:z2, y1:y2, x1:x2] = mask_value
+        # Fill this 3D region with confidence-weighted value
+        attention_mask[channel_idx, z1:z2, y1:y2, x1:x2] = confidence
 
-    # Count coverage
-    c1_voxels = np.sum(attention_mask == 1)
-    c2_voxels = np.sum(attention_mask == 2)
-    c3_c7_voxels = np.sum(attention_mask == 3)
-    total_voxels = D * H * W
+    # Background channel (channel 3): 1.0 where sum of other channels is 0
+    vertebra_coverage = attention_mask[0:3].sum(axis=0)
+    attention_mask[3] = (vertebra_coverage == 0).astype(np.float32)
 
-    print(f"  Attention mask coverage:")
-    print(f"    C1: {c1_voxels / total_voxels * 100:.1f}%")
-    print(f"    C2: {c2_voxels / total_voxels * 100:.1f}%")
-    print(f"    C3-C7: {c3_c7_voxels / total_voxels * 100:.1f}%")
-    print(f"    Background: {(total_voxels - c1_voxels - c2_voxels - c3_c7_voxels) / total_voxels * 100:.1f}%")
+    # Normalize each voxel so weights sum to 1 (for proper weighted blending)
+    total_weight = attention_mask.sum(axis=0, keepdims=True)
+    total_weight = np.maximum(total_weight, 1e-6)  # Avoid division by zero
+    attention_mask = attention_mask / total_weight
+
+    # Statistics
+    c1_coverage = (attention_mask[0] > 0).sum() / (D * H * W) * 100
+    c2_coverage = (attention_mask[1] > 0).sum() / (D * H * W) * 100
+    c3_c7_coverage = (attention_mask[2] > 0).sum() / (D * H * W) * 100
+    bg_coverage = (attention_mask[3] > 0).sum() / (D * H * W) * 100
+
+    print(f"  Attention mask coverage (confidence-weighted):")
+    print(f"    C1: {c1_coverage:.1f}%")
+    print(f"    C2: {c2_coverage:.1f}%")
+    print(f"    C3-C7: {c3_c7_coverage:.1f}%")
+    print(f"    Background: {bg_coverage:.1f}%")
 
     return attention_mask
 
@@ -404,12 +428,13 @@ class DetectorGuidedCervicalAttention3D(nn.Module):
         Convert YOLO attention mask to routing map for feature maps.
 
         Args:
-            attention_mask: (D_full, H_full, W_full) array with values 0,1,2,3
+            attention_mask: (4, D_full, H_full, W_full) confidence-weighted mask
+                           OR (D_full, H_full, W_full) legacy discrete mask
             feature_shape: (D_feat, H_feat, W_feat) target feature map size
             device: torch device
 
         Returns:
-            attention_routing: (3, D_feat, H_feat, W_feat) tensor
+            attention_routing: (3, D_feat, H_feat, W_feat) tensor with confidence weights
         """
         D_feat, H_feat, W_feat = feature_shape
 
@@ -417,30 +442,49 @@ class DetectorGuidedCervicalAttention3D(nn.Module):
         if isinstance(attention_mask, np.ndarray):
             attention_mask = torch.from_numpy(attention_mask).float().to(device)
 
-        # Resize attention mask to match feature map resolution
-        # attention_mask shape: (D, H, W) -> (1, 1, D, H, W) for interpolation
-        mask_resized = F.interpolate(
-            attention_mask.unsqueeze(0).unsqueeze(0),
-            size=(D_feat, H_feat, W_feat),
-            mode='nearest'
-        ).squeeze(0).squeeze(0)  # Back to (D_feat, H_feat, W_feat)
+        # Handle both new (4-channel) and legacy (discrete) formats
+        if attention_mask.ndim == 4 and attention_mask.shape[0] == 4:
+            # New format: (4, D, H, W) confidence-weighted channels
+            # Resize to feature map resolution
+            mask_resized = F.interpolate(
+                attention_mask.unsqueeze(0),  # (1, 4, D, H, W)
+                size=(D_feat, H_feat, W_feat),
+                mode='trilinear',  # Use trilinear for smooth confidence interpolation
+                align_corners=False
+            ).squeeze(0)  # Back to (4, D_feat, H_feat, W_feat)
 
-        # Create 3-channel routing map
-        attention_routing = torch.zeros(3, D_feat, H_feat, W_feat, device=device, dtype=torch.float32)
+            # Extract first 3 channels (C1, C2, C3-C7), ignoring background channel
+            attention_routing = mask_resized[0:3]
 
-        # Channel 0: C1 regions (where mask == 1)
-        attention_routing[0] = (mask_resized == 1).float()
+        else:
+            # Legacy format: (D, H, W) discrete values 0,1,2,3
+            mask_resized = F.interpolate(
+                attention_mask.unsqueeze(0).unsqueeze(0),
+                size=(D_feat, H_feat, W_feat),
+                mode='nearest'
+            ).squeeze(0).squeeze(0)  # Back to (D_feat, H_feat, W_feat)
 
-        # Channel 1: C2 regions (where mask == 2)
-        attention_routing[1] = (mask_resized == 2).float()
+            # Create 3-channel routing map
+            attention_routing = torch.zeros(3, D_feat, H_feat, W_feat, device=device, dtype=torch.float32)
 
-        # Channel 2: C3-C7 regions (where mask == 3)
-        attention_routing[2] = (mask_resized == 3).float()
+            # Channel 0: C1 regions (where mask == 1)
+            attention_routing[0] = (mask_resized == 1).float()
 
-        # Normalize: ensure each voxel has total weight = 1
-        total_weight = attention_routing.sum(dim=0, keepdim=True)
-        total_weight = torch.clamp(total_weight, min=1e-6)
-        attention_routing = attention_routing / total_weight
+            # Channel 1: C2 regions (where mask == 2)
+            attention_routing[1] = (mask_resized == 2).float()
+
+            # Channel 2: C3-C7 regions (where mask == 3)
+            attention_routing[2] = (mask_resized == 3).float()
+
+            # Handle background regions (mask == 0): apply C3-C7 attention as default
+            total_weight = attention_routing.sum(dim=0, keepdim=True)
+            background_mask = (total_weight == 0).float()  # Where no vertebra detected
+            attention_routing[2] += background_mask.squeeze(0)  # Assign background to C3-C7
+
+            # Normalize: ensure each voxel has total weight = 1
+            total_weight = attention_routing.sum(dim=0, keepdim=True)
+            total_weight = torch.clamp(total_weight, min=1e-6)
+            attention_routing = attention_routing / total_weight
 
         return attention_routing
 

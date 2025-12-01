@@ -310,8 +310,11 @@ class nnUNetDatasetWithYOLOAttention(nnUNetDatasetNumpy):
         # Load standard data
         data, seg, seg_prev, properties = super().load_case(identifier)
 
-        # Try to load YOLO attention mask
-        yolo_file = join(self.source_folder, identifier + '_yolo_attention.npz')
+        # Try to load YOLO attention mask from yolo_bbox (sibling to nnUNetPlans_3d_fullres)
+        # source_folder is e.g., DatasetXXX/nnUNetPlans_3d_fullres
+        # yolo_bbox is at DatasetXXX/yolo_bbox
+        parent_folder = os.path.dirname(self.source_folder)
+        yolo_file = join(parent_folder, 'yolo_bbox', identifier + '_yolo_attention.npz')
         if isfile(yolo_file):
             yolo_attention = np.load(yolo_file)['attention']
         else:
