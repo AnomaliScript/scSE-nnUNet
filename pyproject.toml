@@ -92,6 +92,10 @@ dev = [
 requires = ["setuptools>=67.8.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["nnunetv2*"]
+exclude = ["trial_preprocessing*", "yolo_preprocessing*"]
+
 [tool.codespell]
 skip = '.git,*.pdf,*.svg'
 #

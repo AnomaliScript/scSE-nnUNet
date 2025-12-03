@@ -8,12 +8,11 @@ Key modifications:
 1. Adds DetectorGuidedCervicalAttention3D to bottleneck (deepest encoder layer)
 2. Adds DetectorGuidedCervicalAttention3D to all decoder blocks (boundary refinement)
 3. Skip connections remain UNCHANGED for direct gradient flow
-4. Uses YOLO vertebra detector to spatially route attention by cervical level:
-   - C1: Spatial attention only (ring structure)
-   - C2: Enhanced scSE (odontoid process)
-   - C3-C7: Standard scSE
-5. Class-weighted loss: 2x penalty for C6/C7 errors
-6. Maintains full compatibility with nnU-Net's training pipeline
+4. Class-weighted loss: Gradient weighting for C3-C7 (1.5x for C3-C5, 2.5x for C6-C7)
+5. Maintains full compatibility with nnU-Net's training pipeline
+
+NOTE: YOLO vertebra detector integration is currently disabled (Plan B).
+      Testing scSE attention alone first.
 
 Author: Brandon K (@AnomaliScript)
 Date: 2025
@@ -21,185 +20,138 @@ Date: 2025
 
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
-from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetWithYOLOAttention
-from nnunetv2.training.dataloading.data_loader import nnUNetDataLoaderWithYOLO
+# from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetWithYOLOAttention  # YOLO: Plan B
+# from nnunetv2.training.dataloading.data_loader import nnUNetDataLoaderWithYOLO  # YOLO: Plan B
 from torch import nn
 from typing import Union, List, Tuple
 import sys
 from pathlib import Path
 import numpy as np
-from tqdm import tqdm
-from batchgenerators.utilities.file_and_folder_operations import join, isfile
+# from tqdm import tqdm  # YOLO: Plan B
+# from batchgenerators.utilities.file_and_folder_operations import join, isfile  # YOLO: Plan B
 
 # Import custom attention modules
 sys.path.append(str(Path(__file__).parent))
-from scse_modules import DetectorGuidedCervicalAttention3D, generate_yolo_attention_mask
+from scse_modules import DetectorGuidedCervicalAttention3D  # , generate_yolo_attention_mask  # YOLO: Plan B
 
 
 class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
     """
     nnU-Net Trainer with Cervical Level-Aware Attention for ResidualEncoderUNet
 
-    Extends the base nnUNetTrainer to integrate anatomically-informed attention
-    mechanisms into the network architecture's skip connections.
+    Extends the base nnUNetTrainer to integrate scSE attention mechanisms
+    into the bottleneck and decoder blocks.
 
-    Automatically pre-generates YOLO attention masks before training starts.
+    YOLO integration is currently disabled (testing scSE attention alone).
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Path to YOLO model relative to nnunetv2/
-        nnunetv2_root = Path(__file__).resolve().parents[4]  # Navigate up to nnunetv2/
-        self.yolo_model_path = str(nnunetv2_root / 'yolo_models' / 'vertebra_detector_114.pt')
-
     def initialize(self):
-        """Override to pre-generate YOLO masks before training"""
+        """Override to reduce patch size for 8GB GPU"""
+        # YOLO: Plan B (commented out)
+        # nnunetv2_root = Path(__file__).resolve().parents[4]
+        # self.yolo_model_path = str(nnunetv2_root / 'yolo_models' / 'vertebra_detector_114.pt')
+
+        # Reduce patch size BEFORE parent initialization builds the network
+        if not self.was_initialized:
+            # Get original patch size from configuration
+            original_patch_size = self.configuration_manager.configuration['patch_size']
+
+            # Reduce to 50% in each dimension (reduces memory by 87.5%)
+            # 192³ -> 96³
+            reduced_patch_size = [max(32, int(p * 0.5)) for p in original_patch_size]
+
+            # Override patch size in the configuration dict (before network is built)
+            self.configuration_manager.configuration['patch_size'] = reduced_patch_size
+
+            print(f"\n⚠️ LOW VRAM MODE (8GB GPU):")
+            print(f"   Reduced patch size: {original_patch_size} -> {reduced_patch_size}")
+            print(f"   This prevents OOM errors\n")
+
         # Call parent initialization
         super().initialize()
 
-        # Pre-generate YOLO attention masks
-        self.pregenerate_yolo_masks()
+        # YOLO: Plan B (commented out)
+        # self.pregenerate_yolo_masks()
 
-    def pregenerate_yolo_masks(self):
-        """
-        Pre-generate YOLO attention masks for all cases in the dataset.
+    # def pregenerate_yolo_masks(self):
+    #     """
+    #     Pre-generate YOLO attention masks for all cases in the dataset.
 
-        This runs before training starts, generating masks for all cases
-        that don't already have them.
-        """
-        print("\n" + "=" * 70)
-        print("CHECKING FOR YOLO ATTENTION MASKS")
-        print("=" * 70)
+    #     This runs before training starts, generating masks for all cases
+    #     that don't already have them.
+    #     """
+    #     print("\n" + "=" * 70)
+    #     print("CHECKING FOR YOLO ATTENTION MASKS")
+    #     print("=" * 70)
 
-        # Get preprocessed data folder
-        preprocessed_folder = self.preprocessed_dataset_folder
+    #     # Get preprocessed data folder
+    #     preprocessed_folder = self.preprocessed_dataset_folder
 
-        # Create yolo_bbox as sibling to nnUNetPlans_3d_fullres
-        yolo_folder = join(self.preprocessed_dataset_folder_base, 'yolo_bbox')
-        from batchgenerators.utilities.file_and_folder_operations import maybe_mkdir_p
-        maybe_mkdir_p(yolo_folder)
+    #     # Create yolo_bbox as sibling to nnUNetPlans_3d_fullres
+    #     yolo_folder = join(self.preprocessed_dataset_folder_base, 'yolo_bbox')
+    #     from batchgenerators.utilities.file_and_folder_operations import maybe_mkdir_p
+    #     maybe_mkdir_p(yolo_folder)
 
-        # Get all case identifiers
-        from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetNumpy
-        identifiers = nnUNetDatasetNumpy.get_identifiers(preprocessed_folder)
+    #     # Get all case identifiers
+    #     from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetNumpy
+    #     identifiers = nnUNetDatasetNumpy.get_identifiers(preprocessed_folder)
 
-        # Check which cases are missing YOLO masks
-        missing_masks = []
-        for identifier in identifiers:
-            yolo_file = join(yolo_folder, identifier + '_yolo_attention.npz')
-            if not isfile(yolo_file):
-                missing_masks.append(identifier)
+    #     # Check which cases are missing YOLO masks
+    #     missing_masks = []
+    #     for identifier in identifiers:
+    #         yolo_file = join(yolo_folder, identifier + '_yolo_attention.npz')
+    #         if not isfile(yolo_file):
+    #             missing_masks.append(identifier)
 
-        if not missing_masks:
-            print(f"✅ All {len(identifiers)} cases already have YOLO masks!")
-            print(f"📁 Stored in: {yolo_folder}")
-            print("=" * 70 + "\n")
-            return
+    #     if not missing_masks:
+    #         print(f"✅ All {len(identifiers)} cases already have YOLO masks!")
+    #         print(f"📁 Stored in: {yolo_folder}")
+    #         print("=" * 70 + "\n")
+    #         return
 
-        print(f"Found {len(missing_masks)}/{len(identifiers)} cases without YOLO masks")
-        print(f"Generating masks now (using {self.yolo_model_path})...")
-        print(f"📁 Saving to: {yolo_folder}")
-        print("This is a ONE-TIME process. Future training runs will be fast.\n")
+    #     print(f"Found {len(missing_masks)}/{len(identifiers)} cases without YOLO masks")
+    #     print(f"Generating masks now (using {self.yolo_model_path})...")
+    #     print(f"📁 Saving to: {yolo_folder}")
+    #     print("This is a ONE-TIME process. Future training runs will be fast.\n")
 
-        # Generate masks for missing cases
-        for identifier in tqdm(missing_masks, desc="Generating YOLO masks"):
-            try:
-                # Load preprocessed volume
-                data_file = join(preprocessed_folder, identifier + '.npz')
-                data = np.load(data_file)['data']
+    #     # Generate masks for missing cases
+    #     for identifier in tqdm(missing_masks, desc="Generating YOLO masks"):
+    #         try:
+    #             # Load preprocessed volume
+    #             data_file = join(preprocessed_folder, identifier + '.npz')
+    #             data = np.load(data_file)['data']
 
-                # Generate YOLO attention mask
-                attention_mask = generate_yolo_attention_mask(
-                    data,
-                    yolo_model_path=self.yolo_model_path,
-                    conf_threshold=0.25
-                )
+    #             # Generate YOLO attention mask
+    #             attention_mask = generate_yolo_attention_mask(
+    #                 data,
+    #                 yolo_model_path=self.yolo_model_path,
+    #                 conf_threshold=0.25
+    #             )
 
-                # Save mask in yolo_bbox subfolder
-                yolo_file = join(yolo_folder, identifier + '_yolo_attention.npz')
-                np.savez_compressed(yolo_file, attention=attention_mask)
+    #             # Save mask in yolo_bbox subfolder
+    #             yolo_file = join(yolo_folder, identifier + '_yolo_attention.npz')
+    #             np.savez_compressed(yolo_file, attention=attention_mask)
 
-            except Exception as e:
-                print(f"\n⚠️  Error generating mask for {identifier}: {e}")
-                continue
+    #         except Exception as e:
+    #             print(f"\n⚠️  Error generating mask for {identifier}: {e}")
+    #             continue
 
-        print(f"\n✅ All YOLO masks generated and saved!")
-        print(f"📁 Location: {yolo_folder}")
-        print("=" * 70 + "\n")
+    #     print(f"\n✅ All YOLO masks generated and saved!")
+    #     print(f"📁 Location: {yolo_folder}")
+    #     print("=" * 70 + "\n")
 
-    def get_tr_and_val_datasets(self):
-        """Override to use custom dataset with YOLO attention masks"""
-        # Get parent's datasets
-        tr_keys, val_keys = self.do_split()
+    # YOLO: Plan B (commented out)
+    # def get_tr_and_val_datasets(self):
+    #     """Use standard nnU-Net dataset (YOLO attention disabled for now)"""
+    #     # TODO: Fix nnUNetDatasetWithYOLOAttention to work with .b2nd format
+    #     # For now, use standard dataset without YOLO attention
+    #     print("\n⚠️ YOLO attention temporarily disabled - using standard nnU-Net dataset\n")
+    #     return super().get_tr_and_val_datasets()
 
-        # Create datasets with YOLO attention support
-        dataset_tr = nnUNetDatasetWithYOLOAttention(
-            self.preprocessed_dataset_folder,
-            tr_keys,
-            folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage
-        )
-
-        dataset_val = nnUNetDatasetWithYOLOAttention(
-            self.preprocessed_dataset_folder,
-            val_keys,
-            folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage
-        )
-
-        return dataset_tr, dataset_val
-
-    def get_dataloaders(self):
-        """Override to use custom YOLO-aware dataloader"""
-        # Get the parent's transforms and configurations
-        if self.dataset_class is None:
-            from nnunetv2.training.dataloading.nnunet_dataset import infer_dataset_class
-            self.dataset_class = infer_dataset_class(self.preprocessed_dataset_folder)
-
-        patch_size = self.configuration_manager.patch_size
-        deep_supervision_scales = self._get_deep_supervision_scales()
-
-        (
-            rotation_for_DA,
-            do_dummy_2d_data_aug,
-            initial_patch_size,
-            mirror_axes,
-        ) = self.configure_rotation_dummyDA_mirroring_and_inital_patch_size()
-
-        # Training transforms
-        tr_transforms = self.get_training_transforms(
-            patch_size, rotation_for_DA, deep_supervision_scales, mirror_axes, do_dummy_2d_data_aug,
-            use_mask_for_norm=self.configuration_manager.use_mask_for_norm,
-            is_cascaded=self.is_cascaded, foreground_labels=self.label_manager.foreground_labels,
-            regions=self.label_manager.foreground_regions if self.label_manager.has_regions else None,
-            ignore_label=self.label_manager.ignore_label)
-
-        # Validation transforms
-        val_transforms = self.get_validation_transforms(deep_supervision_scales,
-                                                        is_cascaded=self.is_cascaded,
-                                                        foreground_labels=self.label_manager.foreground_labels,
-                                                        regions=self.label_manager.foreground_regions if
-                                                        self.label_manager.has_regions else None,
-                                                        ignore_label=self.label_manager.ignore_label)
-
-        dataset_tr, dataset_val = self.get_tr_and_val_datasets()
-
-        # Use custom YOLO-aware dataloader
-        dl_tr = nnUNetDataLoaderWithYOLO(dataset_tr, self.batch_size,
-                                         initial_patch_size,
-                                         self.configuration_manager.patch_size,
-                                         self.label_manager,
-                                         oversample_foreground_percent=self.oversample_foreground_percent,
-                                         sampling_probabilities=None, pad_sides=None, transforms=tr_transforms,
-                                         probabilistic_oversampling=self.probabilistic_oversampling)
-
-        dl_val = nnUNetDataLoaderWithYOLO(dataset_val, self.batch_size,
-                                          self.configuration_manager.patch_size,
-                                          self.configuration_manager.patch_size,
-                                          self.label_manager,
-                                          oversample_foreground_percent=self.oversample_foreground_percent,
-                                          sampling_probabilities=None, pad_sides=None, transforms=val_transforms,
-                                          probabilistic_oversampling=self.probabilistic_oversampling)
-
-        return dl_tr, dl_val
+    # YOLO: Plan B (commented out)
+    # def get_dataloaders(self):
+    #     """Use standard nnU-Net dataloader (YOLO dataloader disabled for now)"""
+    #     return super().get_dataloaders()
 
     def _build_loss(self):
         """
@@ -219,17 +171,25 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
         import torch
 
-        # Create class weights: penalize C6/C7 (indices 6 and 7) errors more
+        # Create class weights: prioritize lower cervical vertebrae (clinically critical)
         # num_classes = 8 (background + C1-C7)
         num_classes = len(self.label_manager.foreground_labels) + 1  # +1 for background
 
-        class_weights = torch.ones(num_classes, dtype=torch.float32)
-        class_weights[6] = 2.0  # C6: 2x weight
-        class_weights[7] = 2.0  # C7: 2x weight
+        class_weights = torch.ones(num_classes, dtype=torch.float32, device=self.device)
+        # C1-C2: Standard weight (easier anatomy - atlas/axis)
+        # C3-C5: Moderate weight (mid-cervical - important but less challenging)
+        class_weights[3] = 1.5  # C3: 1.5x weight
+        class_weights[4] = 1.5  # C4: 1.5x weight
+        class_weights[5] = 1.5  # C5: 1.5x weight
+        # C6-C7: High weight (hardest to segment, most clinically critical)
+        class_weights[6] = 2.5  # C6: 2.5x weight (proximity to shoulders)
+        class_weights[7] = 2.5  # C7: 2.5x weight (most challenging)
 
         print(f"\n🎯 Class-weighted loss configured:")
-        print(f"   C1-C5: 1.0x weight (standard)")
-        print(f"   C6-C7: 2.0x weight (prioritized)")
+        print(f"   C1-C2: 1.0x weight (standard - distinct anatomy)")
+        print(f"   C3-C5: 1.5x weight (moderate - mid-cervical)")
+        print(f"   C6-C7: 2.5x weight (high - challenging + critical)")
+        print(f"   Device: {self.device}")
 
         # Build DC + CE loss with class weights for CE component
         loss = DC_and_CE_loss(
@@ -256,24 +216,25 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
 
         return loss
 
-    def train_step(self, batch: dict) -> dict:
-        """
-        Override training step to inject YOLO attention masks into network.
-
-        The dataloader returns 5 items: (data, seg, seg_prev, properties, yolo_attention)
-        We need to set the yolo_attention on the network before forward pass.
-        """
-        # YOLO attention mask should be in batch if our custom dataset is working
-        yolo_attention = batch.get('yolo_attention', None)
-
-        # Set attention mask on network (will be read by decoder wrapper)
-        if yolo_attention is not None:
-            self.network.current_attention_mask = yolo_attention
-        else:
-            self.network.current_attention_mask = None
-
-        # Call parent's train_step with modified batch
-        return super().train_step(batch)
+    # YOLO: Plan B (commented out)
+    # def train_step(self, batch: dict) -> dict:
+    #     """
+    #     Override training step to inject YOLO attention masks into network.
+    #
+    #     The dataloader returns 5 items: (data, seg, seg_prev, properties, yolo_attention)
+    #     We need to set the yolo_attention on the network before forward pass.
+    #     """
+    #     # YOLO attention mask should be in batch if our custom dataset is working
+    #     yolo_attention = batch.get('yolo_attention', None)
+    #
+    #     # Set attention mask on network (will be read by decoder wrapper)
+    #     if yolo_attention is not None:
+    #         self.network.current_attention_mask = yolo_attention
+    #     else:
+    #         self.network.current_attention_mask = None
+    #
+    #     # Call parent's train_step with modified batch
+    #     return super().train_step(batch)
 
     @staticmethod
     def build_network_architecture(architecture_class_name: str,
@@ -371,8 +332,9 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         network.decoder_attention_modules = decoder_attention_modules
         network.current_attention_mask = None
 
-        # Step 4: Modify decoder to apply bottleneck + decoder attention
-        original_decoder_forward = network.decoder.forward
+        # Step 4: Replace decoder forward to inject attention
+        # We need to reimplement the decoder logic (not call original) to inject
+        # attention after each decoder block convolution
         import torch
 
         def decoder_forward_with_bottleneck_decoder_attention(skips):
