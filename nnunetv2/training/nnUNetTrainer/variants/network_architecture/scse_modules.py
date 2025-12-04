@@ -20,235 +20,235 @@ from typing import Dict, List, Tuple
 
 
 # ============================================================================
-# YOLO MASK GENERATION UTILITIES
+# YOLO MASK GENERATION UTILITIES (disabled for now)
 # ============================================================================
 
-def generate_yolo_attention_mask(
-    # dw, volume_3d doesn't get changed
-    volume_3d: np.ndarray,
-    yolo_model_path: str = None,
-    conf_threshold: float = 0.25
-) -> np.ndarray:
-    """
-    Generate confidence-weighted 3D attention mask from preprocessed volume using YOLO detector.
+# def generate_yolo_attention_mask(
+#     # dw, volume_3d doesn't get changed
+#     volume_3d: np.ndarray,
+#     yolo_model_path: str = None,
+#     conf_threshold: float = 0.25
+# ) -> np.ndarray:
+#     """
+#     Generate confidence-weighted 3D attention mask from preprocessed volume using YOLO detector.
 
-    This function:
-    1. Takes a 3D volume (preprocessed by nnUNet)
-    2. Runs YOLO detection slice-by-slice
-    3. Aggregates 2D detections into 3D bounding boxes with confidence scores
-    4. Creates a 4-channel confidence-weighted mask:
-       - Channel 0: C1 regions (weighted by YOLO confidence)
-       - Channel 1: C2 regions (weighted by YOLO confidence)
-       - Channel 2: C3-C7 regions (weighted by YOLO confidence)
-       - Channel 3: Background (1.0 where no vertebra detected)
+#     This function:
+#     1. Takes a 3D volume (preprocessed by nnUNet)
+#     2. Runs YOLO detection slice-by-slice
+#     3. Aggregates 2D detections into 3D bounding boxes with confidence scores
+#     4. Creates a 4-channel confidence-weighted mask:
+#        - Channel 0: C1 regions (weighted by YOLO confidence)
+#        - Channel 1: C2 regions (weighted by YOLO confidence)
+#        - Channel 2: C3-C7 regions (weighted by YOLO confidence)
+#        - Channel 3: Background (1.0 where no vertebra detected)
 
-    Args:
-        volume_3d: Preprocessed 3D volume, shape (C, D, H, W) or (D, H, W)
-        yolo_model_path: Path to trained YOLO weights
-        conf_threshold: Detection confidence threshold
+#     Args:
+#         volume_3d: Preprocessed 3D volume, shape (C, D, H, W) or (D, H, W)
+#         yolo_model_path: Path to trained YOLO weights
+#         conf_threshold: Detection confidence threshold
 
-    Returns:
-        attention_mask: 4D array shape (4, D, H, W), dtype float32, normalized so channels sum to 1.0
-    """
-    from ultralytics import YOLO
-    from pathlib import Path
+#     Returns:
+#         attention_mask: 4D array shape (4, D, H, W), dtype float32, normalized so channels sum to 1.0
+#     """
+#     from ultralytics import YOLO
+#     from pathlib import Path
 
-    # Validate YOLO model path
-    if yolo_model_path is None:
-        raise ValueError("yolo_model_path must be provided")
+#     # Validate YOLO model path
+#     if yolo_model_path is None:
+#         raise ValueError("yolo_model_path must be provided")
 
-    if not Path(yolo_model_path).exists():
-        raise FileNotFoundError(f"YOLO model not found at: {yolo_model_path}")
+#     if not Path(yolo_model_path).exists():
+#         raise FileNotFoundError(f"YOLO model not found at: {yolo_model_path}")
 
-    # Handle channel dimension
-    if volume_3d.ndim == 4:
-        # (C, D, H, W) - take first channel
-        volume = volume_3d[0]
-    else:
-        # (D, H, W)
-        volume = volume_3d
+#     # Handle channel dimension
+#     if volume_3d.ndim == 4:
+#         # (C, D, H, W) - take first channel
+#         volume = volume_3d[0]
+#     else:
+#         # (D, H, W)
+#         volume = volume_3d
 
-    D, H, W = volume.shape
+#     D, H, W = volume.shape
 
-    # Normalize to 0-255 for YOLO
-    volume_normalized = ((volume - volume.min()) / (volume.max() - volume.min() + 1e-8) * 255).astype(np.uint8)
+#     # Normalize to 0-255 for YOLO
+#     volume_normalized = ((volume - volume.min()) / (volume.max() - volume.min() + 1e-8) * 255).astype(np.uint8)
 
-    # Load YOLO model
-    model = YOLO(yolo_model_path)
+#     # Load YOLO model
+#     model = YOLO(yolo_model_path)
 
-    # Store 2D detections per slice
-    slice_detections = {}
+#     # Store 2D detections per slice
+#     slice_detections = {}
 
-    print(f"  Running YOLO on {D} slices...")
-    for slice_idx in range(D):
-        slice_2d = volume_normalized[slice_idx, :, :]
+#     print(f"  Running YOLO on {D} slices...")
+#     for slice_idx in range(D):
+#         slice_2d = volume_normalized[slice_idx, :, :]
 
-        # Convert to RGB (YOLO expects 3 channels)
-        slice_rgb = cv2.cvtColor(slice_2d, cv2.COLOR_GRAY2RGB)
+#         # Convert to RGB (YOLO expects 3 channels)
+#         slice_rgb = cv2.cvtColor(slice_2d, cv2.COLOR_GRAY2RGB)
 
-        # Run YOLO inference
-        results = model(slice_rgb, conf=conf_threshold, verbose=False)
+#         # Run YOLO inference
+#         results = model(slice_rgb, conf=conf_threshold, verbose=False)
 
-        # Parse detections for this slice
-        detections = []
-        for result in results:
-            if result.boxes is not None and len(result.boxes) > 0:
-                for box in result.boxes:
-                    detection = {
-                        'class_name': result.names[int(box.cls[0])],
-                        'bbox': box.xyxy[0].cpu().numpy(),  # [x1, y1, x2, y2]
-                        'confidence': float(box.conf[0].cpu().numpy())
-                    }
-                    detections.append(detection)
+#         # Parse detections for this slice
+#         detections = []
+#         for result in results:
+#             if result.boxes is not None and len(result.boxes) > 0:
+#                 for box in result.boxes:
+#                     detection = {
+#                         'class_name': result.names[int(box.cls[0])],
+#                         'bbox': box.xyxy[0].cpu().numpy(),  # [x1, y1, x2, y2]
+#                         'confidence': float(box.conf[0].cpu().numpy())
+#                     }
+#                     detections.append(detection)
 
-        if detections:
-            slice_detections[slice_idx] = detections
+#         if detections:
+#             slice_detections[slice_idx] = detections
 
-    print(f"  Found vertebrae in {len(slice_detections)} slices")
+#     print(f"  Found vertebrae in {len(slice_detections)} slices")
 
-    # Aggregate 2D detections into 3D bounding boxes
-    vertebrae_3d = aggregate_detections_to_3d(slice_detections, (D, H, W))
+#     # Aggregate 2D detections into 3D bounding boxes
+#     vertebrae_3d = aggregate_detections_to_3d(slice_detections, (D, H, W))
 
-    # Create 3D attention mask
-    attention_mask = create_attention_mask_from_vertebrae(vertebrae_3d, (D, H, W))
+#     # Create 3D attention mask
+#     attention_mask = create_attention_mask_from_vertebrae(vertebrae_3d, (D, H, W))
 
-    return attention_mask
-
-
-def aggregate_detections_to_3d(
-    slice_detections: Dict[int, List[Dict]],
-    volume_shape: Tuple[int, int, int]
-) -> Dict[str, Dict]:
-    """
-    Aggregate 2D slice detections into 3D vertebra bounding boxes.
-
-    For each vertebra (C1-C7):
-    - Find all slices where it appears
-    - Take median bbox across those slices
-    - Create 3D bbox: [x_min, x_max, y_min, y_max, z_min, z_max]
-
-    Args:
-        slice_detections: Dict mapping slice_idx -> list of detections
-        volume_shape: (D, H, W)
-
-    Returns:
-        vertebrae_3d: Dict mapping vertebra name -> {'bbox': [...], 'slices': [...]}
-    """
-    D, H, W = volume_shape
-
-    # Group detections by vertebra name
-    vertebra_groups = {}
-
-    for slice_idx, detections in slice_detections.items():
-        for det in detections:
-            vert_name = det['class_name']  # e.g., 'C1', 'C2', etc.
-
-            if vert_name not in vertebra_groups:
-                vertebra_groups[vert_name] = []
-
-            vertebra_groups[vert_name].append({
-                'slice': slice_idx,
-                'bbox_2d': det['bbox'],  # [x1, y1, x2, y2]
-                'confidence': det['confidence']
-            })
-
-    # For each vertebra, create 3D bbox
-    vertebrae_3d = {}
-
-    for vert_name, detections in vertebra_groups.items():
-        slices = [d['slice'] for d in detections]
-        bboxes_2d = np.array([d['bbox_2d'] for d in detections])  # (N, 4)
-
-        # Take median bbox (more robust than mean)
-        median_bbox_2d = np.median(bboxes_2d, axis=0)
-        x1, y1, x2, y2 = median_bbox_2d
-
-        # Z extent is min/max slices
-        z_min = min(slices)
-        z_max = max(slices) + 1  # +1 for inclusive upper bound
-
-        # Clamp to volume bounds
-        x1 = int(max(0, x1))
-        x2 = int(min(W, x2))
-        y1 = int(max(0, y1))
-        y2 = int(min(H, y2))
-        z_min = int(max(0, z_min))
-        z_max = int(min(D, z_max))
-
-        # Average confidence across all detections for this vertebra
-        avg_confidence = np.mean([d['confidence'] for d in detections])
-
-        vertebrae_3d[vert_name] = {
-            'bbox': [x1, x2, y1, y2, z_min, z_max],
-            'slices': slices,
-            'num_detections': len(detections),
-            'confidence': float(avg_confidence)
-        }
-
-    return vertebrae_3d
+#     return attention_mask
 
 
-def create_attention_mask_from_vertebrae(
-    vertebrae_3d: Dict[str, Dict],
-    volume_shape: Tuple[int, int, int]
-) -> np.ndarray:
-    """
-    Create confidence-weighted 3D attention mask from vertebra bounding boxes.
+# def aggregate_detections_to_3d(
+#     slice_detections: Dict[int, List[Dict]],
+#     volume_shape: Tuple[int, int, int]
+# ) -> Dict[str, Dict]:
+#     """
+#     Aggregate 2D slice detections into 3D vertebra bounding boxes.
 
-    Returns 4-channel mask where each channel is weighted by YOLO confidence:
-    - Channel 0: C1 regions (confidence-weighted)
-    - Channel 1: C2 regions (confidence-weighted)
-    - Channel 2: C3-C7 regions (confidence-weighted)
-    - Channel 3: Background (1.0 where no vertebra detected)
+#     For each vertebra (C1-C7):
+#     - Find all slices where it appears
+#     - Take median bbox across those slices
+#     - Create 3D bbox: [x_min, x_max, y_min, y_max, z_min, z_max]
 
-    Args:
-        vertebrae_3d: Dict mapping vertebra name -> {'bbox': [...], 'confidence': float}
-        volume_shape: (D, H, W)
+#     Args:
+#         slice_detections: Dict mapping slice_idx -> list of detections
+#         volume_shape: (D, H, W)
 
-    Returns:
-        attention_mask: 4D array (4, D, H, W), dtype float32
-    """
-    D, H, W = volume_shape
-    # 4 channels: [C1, C2, C3-C7, Background]
-    attention_mask = np.zeros((4, D, H, W), dtype=np.float32)
+#     Returns:
+#         vertebrae_3d: Dict mapping vertebra name -> {'bbox': [...], 'slices': [...]}
+#     """
+#     D, H, W = volume_shape
 
-    for vert_name, vert_data in vertebrae_3d.items():
-        x1, x2, y1, y2, z1, z2 = vert_data['bbox']
-        confidence = vert_data['confidence']
+#     # Group detections by vertebra name
+#     vertebra_groups = {}
 
-        # Determine attention channel
-        if vert_name == 'C1':
-            channel_idx = 0
-        elif vert_name == 'C2':
-            channel_idx = 1
-        else:  # C3, C4, C5, C6, C7
-            channel_idx = 2
+#     for slice_idx, detections in slice_detections.items():
+#         for det in detections:
+#             vert_name = det['class_name']  # e.g., 'C1', 'C2', etc.
 
-        # Fill this 3D region with confidence-weighted value
-        attention_mask[channel_idx, z1:z2, y1:y2, x1:x2] = confidence
+#             if vert_name not in vertebra_groups:
+#                 vertebra_groups[vert_name] = []
 
-    # Background channel (channel 3): 1.0 where sum of other channels is 0
-    vertebra_coverage = attention_mask[0:3].sum(axis=0)
-    attention_mask[3] = (vertebra_coverage == 0).astype(np.float32)
+#             vertebra_groups[vert_name].append({
+#                 'slice': slice_idx,
+#                 'bbox_2d': det['bbox'],  # [x1, y1, x2, y2]
+#                 'confidence': det['confidence']
+#             })
 
-    # Normalize each voxel so weights sum to 1 (for proper weighted blending)
-    total_weight = attention_mask.sum(axis=0, keepdims=True)
-    total_weight = np.maximum(total_weight, 1e-6)  # Avoid division by zero
-    attention_mask = attention_mask / total_weight
+#     # For each vertebra, create 3D bbox
+#     vertebrae_3d = {}
 
-    # Statistics
-    c1_coverage = (attention_mask[0] > 0).sum() / (D * H * W) * 100
-    c2_coverage = (attention_mask[1] > 0).sum() / (D * H * W) * 100
-    c3_c7_coverage = (attention_mask[2] > 0).sum() / (D * H * W) * 100
-    bg_coverage = (attention_mask[3] > 0).sum() / (D * H * W) * 100
+#     for vert_name, detections in vertebra_groups.items():
+#         slices = [d['slice'] for d in detections]
+#         bboxes_2d = np.array([d['bbox_2d'] for d in detections])  # (N, 4)
 
-    print(f"  Attention mask coverage (confidence-weighted):")
-    print(f"    C1: {c1_coverage:.1f}%")
-    print(f"    C2: {c2_coverage:.1f}%")
-    print(f"    C3-C7: {c3_c7_coverage:.1f}%")
-    print(f"    Background: {bg_coverage:.1f}%")
+#         # Take median bbox (more robust than mean)
+#         median_bbox_2d = np.median(bboxes_2d, axis=0)
+#         x1, y1, x2, y2 = median_bbox_2d
 
-    return attention_mask
+#         # Z extent is min/max slices
+#         z_min = min(slices)
+#         z_max = max(slices) + 1  # +1 for inclusive upper bound
+
+#         # Clamp to volume bounds
+#         x1 = int(max(0, x1))
+#         x2 = int(min(W, x2))
+#         y1 = int(max(0, y1))
+#         y2 = int(min(H, y2))
+#         z_min = int(max(0, z_min))
+#         z_max = int(min(D, z_max))
+
+#         # Average confidence across all detections for this vertebra
+#         avg_confidence = np.mean([d['confidence'] for d in detections])
+
+#         vertebrae_3d[vert_name] = {
+#             'bbox': [x1, x2, y1, y2, z_min, z_max],
+#             'slices': slices,
+#             'num_detections': len(detections),
+#             'confidence': float(avg_confidence)
+#         }
+
+#     return vertebrae_3d
+
+
+# def create_attention_mask_from_vertebrae(
+#     vertebrae_3d: Dict[str, Dict],
+#     volume_shape: Tuple[int, int, int]
+# ) -> np.ndarray:
+#     """
+#     Create confidence-weighted 3D attention mask from vertebra bounding boxes.
+
+#     Returns 4-channel mask where each channel is weighted by YOLO confidence:
+#     - Channel 0: C1 regions (confidence-weighted)
+#     - Channel 1: C2 regions (confidence-weighted)
+#     - Channel 2: C3-C7 regions (confidence-weighted)
+#     - Channel 3: Background (1.0 where no vertebra detected)
+
+#     Args:
+#         vertebrae_3d: Dict mapping vertebra name -> {'bbox': [...], 'confidence': float}
+#         volume_shape: (D, H, W)
+
+#     Returns:
+#         attention_mask: 4D array (4, D, H, W), dtype float32
+#     """
+#     D, H, W = volume_shape
+#     # 4 channels: [C1, C2, C3-C7, Background]
+#     attention_mask = np.zeros((4, D, H, W), dtype=np.float32)
+
+#     for vert_name, vert_data in vertebrae_3d.items():
+#         x1, x2, y1, y2, z1, z2 = vert_data['bbox']
+#         confidence = vert_data['confidence']
+
+#         # Determine attention channel
+#         if vert_name == 'C1':
+#             channel_idx = 0
+#         elif vert_name == 'C2':
+#             channel_idx = 1
+#         else:  # C3, C4, C5, C6, C7
+#             channel_idx = 2
+
+#         # Fill this 3D region with confidence-weighted value
+#         attention_mask[channel_idx, z1:z2, y1:y2, x1:x2] = confidence
+
+#     # Background channel (channel 3): 1.0 where sum of other channels is 0
+#     vertebra_coverage = attention_mask[0:3].sum(axis=0)
+#     attention_mask[3] = (vertebra_coverage == 0).astype(np.float32)
+
+#     # Normalize each voxel so weights sum to 1 (for proper weighted blending)
+#     total_weight = attention_mask.sum(axis=0, keepdims=True)
+#     total_weight = np.maximum(total_weight, 1e-6)  # Avoid division by zero
+#     attention_mask = attention_mask / total_weight
+
+#     # Statistics
+#     c1_coverage = (attention_mask[0] > 0).sum() / (D * H * W) * 100
+#     c2_coverage = (attention_mask[1] > 0).sum() / (D * H * W) * 100
+#     c3_c7_coverage = (attention_mask[2] > 0).sum() / (D * H * W) * 100
+#     bg_coverage = (attention_mask[3] > 0).sum() / (D * H * W) * 100
+
+#     print(f"  Attention mask coverage (confidence-weighted):")
+#     print(f"    C1: {c1_coverage:.1f}%")
+#     print(f"    C2: {c2_coverage:.1f}%")
+#     print(f"    C3-C7: {c3_c7_coverage:.1f}%")
+#     print(f"    Background: {bg_coverage:.1f}%")
+
+#     return attention_mask
 
 
 # ============================================================================

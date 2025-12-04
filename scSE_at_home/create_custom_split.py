@@ -7,8 +7,7 @@ import random
 from pathlib import Path
 
 # Paths
-preprocessed_folder = Path(r"C:\\Users\\anoma\\Downloads\\scse-nnUNet\\scSE_at_home\\nnUNet_preprocessed\\Dataset001_Cervical")
-raw_folder = Path(r"C:\\Users\\anoma\\Downloads\\scse-nnUNet\\scSE_at_home\\nnUNet_raw\\Dataset001_Cervical\\imagesTr")
+raw_folder = Path(r"C:\\Users\\anoma\\Downloads\\scse-nnUNet\\scSE_at_home\\nnUNet_raw\\imagesTr")
 
 # Get all case identifiers from imagesTr
 image_files = sorted(raw_folder.glob("*.nii.gz"))
@@ -35,7 +34,7 @@ splits = [
 ]
 
 # Save splits file
-output_file = preprocessed_folder / "splits_final.json"
+output_file = Path(r"C:\\Users\\anoma\\Downloads\\scse-nnUNet\\scSE_at_home") / "splits_final.json"
 with open(output_file, 'w') as f:
     json.dump(splits, f, indent=4)
 
