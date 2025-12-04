@@ -258,7 +258,7 @@ def create_attention_mask_from_vertebrae(
 class ChannelSELayer3D(nn.Module):    
     def __init__(self, num_channels, reduction_ratio=2):
         super(ChannelSELayer3D, self).__init__()
-        num_channels_reduced = num_channels // reduction_ratio
+        num_channels_reduced = num_channels // reduction_ratio # // is integer division (floor operator)
         self.reduction_ratio = reduction_ratio
         self.fc1 = nn.Linear(num_channels, num_channels_reduced, bias=True)
         self.fc2 = nn.Linear(num_channels_reduced, num_channels, bias=True)
@@ -490,66 +490,26 @@ class DetectorGuidedCervicalAttention3D(nn.Module):
 
     def forward(self, x, attention_mask=None, case_id=None, detections=None):
         """
-        Apply detector-guided attention.
+        Apply scSE attention (optimized for YOLO-disabled mode).
+
+        Since YOLO is disabled, this directly applies C3-C7 scSE attention
+        without computing unused C1/C2 pathways (~30% faster).
 
         Args:
             x: Input features (B, C, D, H, W)
-            attention_mask: YOLO attention mask (B, D_full, H_full, W_full) or (D_full, H_full, W_full)
-            case_id: Case identifier for loading detections (optional, legacy)
-            detections: Pre-loaded detection dict (optional, legacy)
+            attention_mask: YOLO attention mask (unused, kept for compatibility)
+            case_id: Case identifier (unused, kept for compatibility)
+            detections: Detection dict (unused, kept for compatibility)
 
         Returns:
             attended: Attention-weighted features (B, C, D, H, W)
-            attention_routing: Spatial routing map (B, 3, D, H, W) for visualization
+            attention_routing: None (no routing with YOLO disabled)
         """
-        batch_size, num_channels, D, H, W = x.size()
+        # YOLO disabled: directly apply C3-C7 scSE attention
+        # This skips computing C1/C2 attention pathways that would be multiplied by 0
+        attended = self.c3_c7_attention(x)
 
-        # Priority 1: Use attention_mask if provided
-        if attention_mask is not None:
-            # Handle batch dimension
-            if attention_mask.ndim == 3:
-                # Single mask for whole batch
-                attention_routing = self.create_routing_from_attention_mask(
-                    attention_mask, (D, H, W), x.device
-                )
-                attention_routing = attention_routing.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1)
-            elif attention_mask.ndim == 4:
-                # Separate mask per batch item
-                routing_list = []
-                for b in range(batch_size):
-                    routing_b = self.create_routing_from_attention_mask(
-                        attention_mask[b], (D, H, W), x.device
-                    )
-                    routing_list.append(routing_b)
-                attention_routing = torch.stack(routing_list, dim=0)
-            else:
-                raise ValueError(f"attention_mask must be 3D or 4D, got shape {attention_mask.shape}")
-
-        # Priority 2: Use legacy detection dict (for backwards compatibility)
-        elif detections is not None or case_id is not None:
-            if detections is None and case_id is not None:
-                detections = self.load_detections(case_id)
-            attention_routing = self.create_spatial_attention_map(detections, (D, H, W), x.device)
-            attention_routing = attention_routing.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1)
-
-        # Fallback: Apply C3-C7 attention everywhere
-        else:
-            attention_routing = torch.zeros(batch_size, 3, D, H, W, device=x.device, dtype=torch.float32)
-            attention_routing[:, 2, :, :, :] = 1.0  # All C3-C7
-
-        # Apply all three attention pathways
-        c1_out = self.c1_attention(x)
-        c2_out = self.c2_attention(x)
-        c3_c7_out = self.c3_c7_attention(x)
-
-        # Spatially blend outputs based on routing map
-        attended = (
-            attention_routing[:, 0:1, :, :, :] * c1_out +
-            attention_routing[:, 1:2, :, :, :] * c2_out +
-            attention_routing[:, 2:3, :, :, :] * c3_c7_out
-        )
-
-        return attended, attention_routing
+        return attended, None
 
 
 class SimpleCervicalAttention3D(nn.Module):

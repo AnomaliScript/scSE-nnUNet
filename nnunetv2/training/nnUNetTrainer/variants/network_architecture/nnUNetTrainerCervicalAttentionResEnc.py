@@ -46,7 +46,6 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
     """
 
     def initialize(self):
-        """Override to reduce patch size for 8GB GPU"""
         # YOLO: Plan B (commented out)
         # nnunetv2_root = Path(__file__).resolve().parents[4]
         # self.yolo_model_path = str(nnunetv2_root / 'yolo_models' / 'vertebra_detector_114.pt')
@@ -56,16 +55,19 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             # Get original patch size from configuration
             original_patch_size = self.configuration_manager.configuration['patch_size']
 
-            # Reduce to 50% in each dimension (reduces memory by 87.5%)
-            # 192³ -> 96³
-            reduced_patch_size = [max(32, int(p * 0.5)) for p in original_patch_size]
+            # OPTION 1: Current 96³ (AS-IS)
+            reduced_patch_size = [96, 96, 96]
 
-            # Override patch size in the configuration dict (before network is built)
-            self.configuration_manager.configuration['patch_size'] = reduced_patch_size
+            # OPTION 2: Hard-set to 64³
+            # reduced_patch_size = [64, 64, 64]
 
-            print(f"\n⚠️ LOW VRAM MODE (8GB GPU):")
-            print(f"   Reduced patch size: {original_patch_size} -> {reduced_patch_size}")
-            print(f"   This prevents OOM errors\n")
+            # # OPTION 3: Try 128³
+            # reduced_patch_size = [128, 128, 128]
+
+            # # OPTION 4: Anisotropic 160×96×96 (follows spine anatomy)
+            # reduced_patch_size = [160, 96, 96]
+
+            print(f"   Patch size: {original_patch_size} -> {reduced_patch_size}")
 
         # Call parent initialization
         super().initialize()
