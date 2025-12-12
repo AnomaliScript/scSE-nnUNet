@@ -59,13 +59,13 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             # edited_patch_size = [96, 96, 96]
 
             # OPTION 2: Hard-set to 64³
-            # edited_patch_size = [64, 64, 64]
+            edited_patch_size = [64, 64, 64]
 
             # # OPTION 3: Try 128³
             # edited_patch_size = [128, 128, 128]
 
-            # # OPTION 4: Anisotropic 160×96×96 (follows spine anatomy)
-            edited_patch_size = [160, 96, 96]
+            # # # OPTION 4: Anisotropic 160×96×96 (follows spine anatomy)
+            # edited_patch_size = [160, 96, 96]
 
             self.configuration_manager.configuration['patch_size'] = edited_patch_size
             print(f"   Patch size: {original_patch_size} -> {edited_patch_size}")
@@ -407,6 +407,6 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         print(f"   Bottleneck attention: {'✓' if bottleneck_attention else '✗'}")
         print(f"   Decoder attention modules: {len(decoder_attention_modules)}")
         print(f"   Skip connections: UNCHANGED (direct gradient flow)")
-        print(f"   Architecture: {architecture_class_name.split('.')[-1]}")
+        print(f"   Architecture: {architecture_class_name}")
 
         return network
