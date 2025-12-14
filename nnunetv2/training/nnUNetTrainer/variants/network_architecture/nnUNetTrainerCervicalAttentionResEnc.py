@@ -59,19 +59,22 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             # edited_patch_size = [96, 96, 96]
 
             # OPTION 2: Hard-set to 64³
-            edited_patch_size = [64, 64, 64]
+            # edited_patch_size = [64, 64, 64]
 
-            # # OPTION 3: Try 128³
+            # OPTION 3: Try 128³
             # edited_patch_size = [128, 128, 128]
 
-            # # # OPTION 4: Anisotropic 96×96×160 (follows spine anatomy)
-            edited_patch_size = [64, 64, 128]
+            # OPTION 4: Anisotropic (follows spine anatomy)
+            # edited_patch_size = [64, 64, 128]
+
+            # #OPTION 5: Adjusted Anisotropic (follows spine anatomy)
+            edited_patch_size = [32, 32, 64]
 
             self.configuration_manager.configuration['patch_size'] = edited_patch_size
             print(f"   Patch size: {original_patch_size} -> {edited_patch_size}")
 
         # well well well you can also edit batch size here too
-        self.configuration_manager.configuration['batch_size'] = 32
+        self.configuration_manager.configuration['batch_size'] = 64
 
         # Call parent initialization
         super().initialize()
