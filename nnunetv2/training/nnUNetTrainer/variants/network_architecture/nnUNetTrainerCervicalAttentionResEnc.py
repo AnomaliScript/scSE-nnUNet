@@ -55,19 +55,13 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             # Get original patch size from configuration
             original_patch_size = self.configuration_manager.configuration['patch_size']
 
-            # OPTION 1: Current 96³ (AS-IS)
-            # edited_patch_size = [96, 96, 96]
+            # OPTION 1: Smallest 32³
+            # edited_patch_size = [32, 32, 32]
 
             # OPTION 2: Hard-set to 64³
             # edited_patch_size = [64, 64, 64]
 
-            # OPTION 3: Try 128³
-            # edited_patch_size = [128, 128, 128]
-
-            # OPTION 4: Anisotropic (follows spine anatomy)
-            # edited_patch_size = [64, 64, 128]
-
-            # #OPTION 5: Adjusted Anisotropic (follows spine anatomy)
+            # #OPTION 3: Adjusted Anisotropic (follows spine anatomy)
             edited_patch_size = [32, 32, 64]
 
             self.configuration_manager.configuration['patch_size'] = edited_patch_size
