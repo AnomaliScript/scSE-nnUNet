@@ -54,14 +54,14 @@ class AnatomicalRegion(Enum):
     """Cervical spine anatomical regions with surgical criticality scores"""
     BACKGROUND = 0
     VERTEBRAL_BODY = 1
-    PEDICLE = 2  # Primary target structure
-    SPINAL_CANAL = 3  # Critical - must not breach
-    VERTEBRAL_ARTERY = 4  # Critical vascular (C1-C6 transverse foramen)
-    NERVE_ROOT = 5  # Critical neural (exiting nerve roots)
-    FACET_JOINT = 6
-    INTERVERTEBRAL_DISC = 7
-    SOFT_TISSUE = 8
-    LIGAMENT = 9
+    # PEDICLE = 2  # Primary target structure
+    # SPINAL_CANAL = 3  # Critical - must not breach
+    # VERTEBRAL_ARTERY = 4  # Critical vascular (C1-C6 transverse foramen)
+    # NERVE_ROOT = 5  # Critical neural (exiting nerve roots)
+    # FACET_JOINT = 6
+    # INTERVERTEBRAL_DISC = 7
+    # SOFT_TISSUE = 8
+    # LIGAMENT = 9
 
 
 class SurgicalPhase(Enum):
@@ -3394,4 +3394,3 @@ exporter.export_surgical_json("patient_plan.json", trajectory)
     print("\n" + "="*80)
     print(" "*15 + "READY FOR PATENT FILING AND CLINICAL TRIALS")
     print("="*80 + "\n")
-

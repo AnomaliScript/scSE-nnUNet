@@ -32,7 +32,12 @@ import numpy as np
 
 # Import custom attention modules
 sys.path.append(str(Path(__file__).parent))
-from scse_modules import DetectorGuidedCervicalAttention3D  # , generate_yolo_attention_mask  # YOLO: Plan B
+from scse_modules import (
+    DetectorGuidedCervicalAttention3D,
+    FasterRCNN3D,
+    USE_FASTER_RCNN_ATTENTION,
+    FASTER_RCNN_WEIGHTS_PATH
+)
 
 
 class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
@@ -73,8 +78,74 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         # Call parent initialization
         super().initialize()
 
+        # Initialize Faster R-CNN detector (if enabled)
+        self._load_faster_rcnn_detector()
+
+        # Attach Faster R-CNN to network (if loaded)
+        if hasattr(self, 'faster_rcnn_model') and self.faster_rcnn_model is not None:
+            self.network.faster_rcnn_model = self.faster_rcnn_model
+            print(f"   📎 Faster R-CNN attached to network")
+
         # YOLO: Plan B (commented out)
         # self.pregenerate_yolo_masks()
+
+    def _load_faster_rcnn_detector(self):
+        """
+        Load pretrained Faster R-CNN detector for attention guidance.
+        Only loads if USE_FASTER_RCNN_ATTENTION is True and weights exist.
+        """
+        self.faster_rcnn_model = None
+
+        if not USE_FASTER_RCNN_ATTENTION:
+            print("\n🔘 Faster R-CNN attention: DISABLED (using fallback uniform attention)")
+            print("   To enable: Set USE_FASTER_RCNN_ATTENTION = True in scse_modules.py")
+            return
+
+        print("\n🔍 Faster R-CNN attention: ENABLED")
+        print(f"   Looking for weights at: {FASTER_RCNN_WEIGHTS_PATH}")
+
+        # Resolve path
+        if Path(FASTER_RCNN_WEIGHTS_PATH).is_absolute():
+            weights_path = Path(FASTER_RCNN_WEIGHTS_PATH)
+        else:
+            # Relative to nnunetv2 root
+            nnunetv2_root = Path(__file__).resolve().parents[4]
+            weights_path = nnunetv2_root / FASTER_RCNN_WEIGHTS_PATH
+
+        if not weights_path.exists():
+            print(f"   ⚠️  WARNING: Weights file not found!")
+            print(f"   Expected location: {weights_path}")
+            print(f"   Falling back to uniform attention")
+            return
+
+        try:
+            import torch
+            # Initialize Faster R-CNN model
+            # Match the in_channels to your encoder output (typically 32 for first stage)
+            # You may need to adjust this based on where you attach it
+            self.faster_rcnn_model = FasterRCNN3D(
+                in_channels=320,  # Bottleneck channels (adjust if needed)
+                num_classes=8,
+                score_threshold=0.25
+            ).to(self.device)
+
+            # Load pretrained weights
+            state_dict = torch.load(weights_path, map_location=self.device)
+            self.faster_rcnn_model.load_state_dict(state_dict)
+            self.faster_rcnn_model.eval()
+
+            # Freeze detector weights (don't train during segmentation)
+            for param in self.faster_rcnn_model.parameters():
+                param.requires_grad = False
+
+            print(f"   ✅ Faster R-CNN loaded successfully!")
+            print(f"   Device: {self.device}")
+            print(f"   Mode: Frozen (inference only)")
+
+        except Exception as e:
+            print(f"   ⚠️  ERROR loading Faster R-CNN: {e}")
+            print(f"   Falling back to uniform attention")
+            self.faster_rcnn_model = None
 
     # def pregenerate_yolo_masks(self):
     #     """
@@ -334,6 +405,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         network.bottleneck_attention = bottleneck_attention
         network.decoder_attention_modules = decoder_attention_modules
         network.current_attention_mask = None
+        network.faster_rcnn_model = None  # Will be set by trainer
 
         # Step 4: Replace decoder forward to inject attention
         # We need to reimplement the decoder logic (not call original) to inject
@@ -354,11 +426,16 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
                 Decoder output (segmentation logits)
             """
             attention_mask = getattr(network, 'current_attention_mask', None)
+            faster_rcnn_model = getattr(network, 'faster_rcnn_model', None)
 
             # PHASE 1: Apply attention to BOTTLENECK only
             bottleneck = skips[-1]
             if network.bottleneck_attention is not None:
-                bottleneck, _ = network.bottleneck_attention(bottleneck, attention_mask=attention_mask)
+                bottleneck, _ = network.bottleneck_attention(
+                    bottleneck,
+                    attention_mask=attention_mask,
+                    faster_rcnn_model=faster_rcnn_model
+                )
 
             # Skip connections pass through unchanged
             modified_skips = skips[:-1] + [bottleneck]
@@ -379,7 +456,11 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
 
                 # APPLY DECODER ATTENTION
                 if s < len(network.decoder_attention_modules) and network.decoder_attention_modules[s] is not None:
-                    x, _ = network.decoder_attention_modules[s](x, attention_mask=attention_mask)
+                    x, _ = network.decoder_attention_modules[s](
+                        x,
+                        attention_mask=attention_mask,
+                        faster_rcnn_model=faster_rcnn_model
+                    )
 
                 # Deep supervision
                 if network.decoder.deep_supervision:

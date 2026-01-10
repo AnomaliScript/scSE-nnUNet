@@ -28,7 +28,11 @@ except ImportError:
 
 # Import surgical marching cubes module for volume rendering
 try:
-    from surgical_marching_cubes import extract_surface_mesh, create_pyvista_mesh
+    import sys
+    from pathlib import Path
+    # Add parent directory to path to import from colab folder
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from colab.marching_cubes_core_data import extract_surface_mesh, create_pyvista_mesh
     MARCHING_CUBES_AVAILABLE = True
 except ImportError:
     print("WARNING: surgical_marching_cubes module not found.")

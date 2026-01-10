@@ -8,7 +8,11 @@ import numpy as np
 print("Testing surgical_marching_cubes import...")
 
 try:
-    from surgical_marching_cubes import (
+    import sys
+    from pathlib import Path
+    # Add parent directory to path to import from colab folder
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from colab.marching_cubes_core_data import (
         extract_surface_mesh,
         create_pyvista_mesh,
         AnatomicalRegion,

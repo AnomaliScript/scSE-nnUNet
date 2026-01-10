@@ -20,235 +20,507 @@ from typing import Dict, List, Tuple
 
 
 # ============================================================================
-# YOLO MASK GENERATION UTILITIES (disabled for now)
+# CONFIGURATION SWITCHES
 # ============================================================================
 
-# def generate_yolo_attention_mask(
-#     # dw, volume_3d doesn't get changed
-#     volume_3d: np.ndarray,
-#     yolo_model_path: str = None,
-#     conf_threshold: float = 0.25
-# ) -> np.ndarray:
-#     """
-#     Generate confidence-weighted 3D attention mask from preprocessed volume using YOLO detector.
+# Enable/disable Faster R-CNN for detector-guided attention
+# Set to True to use Faster R-CNN detections for spatial attention routing
+# Set to False to use fallback uniform attention (C3-C7 attention everywhere)
+USE_FASTER_RCNN_ATTENTION = False  # <-- EDIT THIS LINE TO ENABLE/DISABLE
 
-#     This function:
-#     1. Takes a 3D volume (preprocessed by nnUNet)
-#     2. Runs YOLO detection slice-by-slice
-#     3. Aggregates 2D detections into 3D bounding boxes with confidence scores
-#     4. Creates a 4-channel confidence-weighted mask:
-#        - Channel 0: C1 regions (weighted by YOLO confidence)
-#        - Channel 1: C2 regions (weighted by YOLO confidence)
-#        - Channel 2: C3-C7 regions (weighted by YOLO confidence)
-#        - Channel 3: Background (1.0 where no vertebra detected)
-
-#     Args:
-#         volume_3d: Preprocessed 3D volume, shape (C, D, H, W) or (D, H, W)
-#         yolo_model_path: Path to trained YOLO weights
-#         conf_threshold: Detection confidence threshold
-
-#     Returns:
-#         attention_mask: 4D array shape (4, D, H, W), dtype float32, normalized so channels sum to 1.0
-#     """
-#     from ultralytics import YOLO
-#     from pathlib import Path
-
-#     # Validate YOLO model path
-#     if yolo_model_path is None:
-#         raise ValueError("yolo_model_path must be provided")
-
-#     if not Path(yolo_model_path).exists():
-#         raise FileNotFoundError(f"YOLO model not found at: {yolo_model_path}")
-
-#     # Handle channel dimension
-#     if volume_3d.ndim == 4:
-#         # (C, D, H, W) - take first channel
-#         volume = volume_3d[0]
-#     else:
-#         # (D, H, W)
-#         volume = volume_3d
-
-#     D, H, W = volume.shape
-
-#     # Normalize to 0-255 for YOLO
-#     volume_normalized = ((volume - volume.min()) / (volume.max() - volume.min() + 1e-8) * 255).astype(np.uint8)
-
-#     # Load YOLO model
-#     model = YOLO(yolo_model_path)
-
-#     # Store 2D detections per slice
-#     slice_detections = {}
-
-#     print(f"  Running YOLO on {D} slices...")
-#     for slice_idx in range(D):
-#         slice_2d = volume_normalized[slice_idx, :, :]
-
-#         # Convert to RGB (YOLO expects 3 channels)
-#         slice_rgb = cv2.cvtColor(slice_2d, cv2.COLOR_GRAY2RGB)
-
-#         # Run YOLO inference
-#         results = model(slice_rgb, conf=conf_threshold, verbose=False)
-
-#         # Parse detections for this slice
-#         detections = []
-#         for result in results:
-#             if result.boxes is not None and len(result.boxes) > 0:
-#                 for box in result.boxes:
-#                     detection = {
-#                         'class_name': result.names[int(box.cls[0])],
-#                         'bbox': box.xyxy[0].cpu().numpy(),  # [x1, y1, x2, y2]
-#                         'confidence': float(box.conf[0].cpu().numpy())
-#                     }
-#                     detections.append(detection)
-
-#         if detections:
-#             slice_detections[slice_idx] = detections
-
-#     print(f"  Found vertebrae in {len(slice_detections)} slices")
-
-#     # Aggregate 2D detections into 3D bounding boxes
-#     vertebrae_3d = aggregate_detections_to_3d(slice_detections, (D, H, W))
-
-#     # Create 3D attention mask
-#     attention_mask = create_attention_mask_from_vertebrae(vertebrae_3d, (D, H, W))
-
-#     return attention_mask
+# Path to pretrained Faster R-CNN weights (if USE_FASTER_RCNN_ATTENTION=True)
+FASTER_RCNN_WEIGHTS_PATH = "nnunetv2/training/pretrained_models/faster_rcnn_vertebra.pth"
 
 
-# def aggregate_detections_to_3d(
-#     slice_detections: Dict[int, List[Dict]],
-#     volume_shape: Tuple[int, int, int]
-# ) -> Dict[str, Dict]:
-#     """
-#     Aggregate 2D slice detections into 3D vertebra bounding boxes.
+# ============================================================================
+# 3D FASTER R-CNN FOR VERTEBRA DETECTION
+# ============================================================================
 
-#     For each vertebra (C1-C7):
-#     - Find all slices where it appears
-#     - Take median bbox across those slices
-#     - Create 3D bbox: [x_min, x_max, y_min, y_max, z_min, z_max]
+class RegionProposalNetwork3D(nn.Module):
+    """
+    3D Region Proposal Network (RPN)
+    Generates region proposals from 3D feature maps for vertebra detection.
+    """
+    def __init__(self, in_channels, num_anchors=9, anchor_stride=2):
+        """
+        Args:
+            in_channels: Number of input feature channels
+            num_anchors: Number of anchor boxes per spatial location
+            anchor_stride: Stride for anchor generation (downsampling factor)
+        """
+        super(RegionProposalNetwork3D, self).__init__()
 
-#     Args:
-#         slice_detections: Dict mapping slice_idx -> list of detections
-#         volume_shape: (D, H, W)
+        self.num_anchors = num_anchors
+        self.anchor_stride = anchor_stride
 
-#     Returns:
-#         vertebrae_3d: Dict mapping vertebra name -> {'bbox': [...], 'slices': [...]}
-#     """
-#     D, H, W = volume_shape
+        # Shared 3D convolution for feature extraction
+        self.conv = nn.Conv3d(in_channels, 512, kernel_size=3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
 
-#     # Group detections by vertebra name
-#     vertebra_groups = {}
+        # Classification branch: objectness score (vertebra vs background)
+        self.cls_logits = nn.Conv3d(512, num_anchors * 2, kernel_size=1)
 
-#     for slice_idx, detections in slice_detections.items():
-#         for det in detections:
-#             vert_name = det['class_name']  # e.g., 'C1', 'C2', etc.
+        # Regression branch: bbox refinement (6 coords for 3D: x, y, z, d, h, w)
+        self.bbox_pred = nn.Conv3d(512, num_anchors * 6, kernel_size=1)
 
-#             if vert_name not in vertebra_groups:
-#                 vertebra_groups[vert_name] = []
+        self._initialize_weights()
 
-#             vertebra_groups[vert_name].append({
-#                 'slice': slice_idx,
-#                 'bbox_2d': det['bbox'],  # [x1, y1, x2, y2]
-#                 'confidence': det['confidence']
-#             })
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.normal_(m.weight, std=0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
-#     # For each vertebra, create 3D bbox
-#     vertebrae_3d = {}
+    def forward(self, features):
+        """
+        Args:
+            features: (B, C, D, H, W) feature map from backbone
 
-#     for vert_name, detections in vertebra_groups.items():
-#         slices = [d['slice'] for d in detections]
-#         bboxes_2d = np.array([d['bbox_2d'] for d in detections])  # (N, 4)
+        Returns:
+            objectness: (B, num_anchors*2, D', H', W') objectness scores
+            bbox_deltas: (B, num_anchors*6, D', H', W') bbox refinements
+        """
+        # Shared feature extraction
+        x = self.relu(self.conv(features))
 
-#         # Take median bbox (more robust than mean)
-#         median_bbox_2d = np.median(bboxes_2d, axis=0)
-#         x1, y1, x2, y2 = median_bbox_2d
+        # Objectness classification
+        objectness = self.cls_logits(x)
 
-#         # Z extent is min/max slices
-#         z_min = min(slices)
-#         z_max = max(slices) + 1  # +1 for inclusive upper bound
+        # Bounding box regression
+        bbox_deltas = self.bbox_pred(x)
 
-#         # Clamp to volume bounds
-#         x1 = int(max(0, x1))
-#         x2 = int(min(W, x2))
-#         y1 = int(max(0, y1))
-#         y2 = int(min(H, y2))
-#         z_min = int(max(0, z_min))
-#         z_max = int(min(D, z_max))
-
-#         # Average confidence across all detections for this vertebra
-#         avg_confidence = np.mean([d['confidence'] for d in detections])
-
-#         vertebrae_3d[vert_name] = {
-#             'bbox': [x1, x2, y1, y2, z_min, z_max],
-#             'slices': slices,
-#             'num_detections': len(detections),
-#             'confidence': float(avg_confidence)
-#         }
-
-#     return vertebrae_3d
+        return objectness, bbox_deltas
 
 
-# def create_attention_mask_from_vertebrae(
-#     vertebrae_3d: Dict[str, Dict],
-#     volume_shape: Tuple[int, int, int]
-# ) -> np.ndarray:
-#     """
-#     Create confidence-weighted 3D attention mask from vertebra bounding boxes.
+class RoIAlign3D(nn.Module):
+    """
+    3D RoI Align for extracting fixed-size features from proposals.
+    Uses trilinear interpolation for smooth gradients.
+    """
+    def __init__(self, output_size=(7, 7, 7), spatial_scale=1.0):
+        """
+        Args:
+            output_size: Target size for output features (D, H, W)
+            spatial_scale: Scale factor between feature map and input volume
+        """
+        super(RoIAlign3D, self).__init__()
+        self.output_size = output_size
+        self.spatial_scale = spatial_scale
 
-#     Returns 4-channel mask where each channel is weighted by YOLO confidence:
-#     - Channel 0: C1 regions (confidence-weighted)
-#     - Channel 1: C2 regions (confidence-weighted)
-#     - Channel 2: C3-C7 regions (confidence-weighted)
-#     - Channel 3: Background (1.0 where no vertebra detected)
+    def forward(self, features, proposals):
+        """
+        Args:
+            features: (B, C, D, H, W) feature map
+            proposals: List of tensors, each (N, 6) [x1, y1, z1, x2, y2, z2]
 
-#     Args:
-#         vertebrae_3d: Dict mapping vertebra name -> {'bbox': [...], 'confidence': float}
-#         volume_shape: (D, H, W)
+        Returns:
+            roi_features: (total_proposals, C, D_out, H_out, W_out)
+        """
+        B, C, D, H, W = features.shape
+        D_out, H_out, W_out = self.output_size
 
-#     Returns:
-#         attention_mask: 4D array (4, D, H, W), dtype float32
-#     """
-#     D, H, W = volume_shape
-#     # 4 channels: [C1, C2, C3-C7, Background]
-#     attention_mask = np.zeros((4, D, H, W), dtype=np.float32)
+        roi_features_list = []
 
-#     for vert_name, vert_data in vertebrae_3d.items():
-#         x1, x2, y1, y2, z1, z2 = vert_data['bbox']
-#         confidence = vert_data['confidence']
+        for batch_idx, batch_proposals in enumerate(proposals):
+            if batch_proposals.shape[0] == 0:
+                continue
 
-#         # Determine attention channel
-#         if vert_name == 'C1':
-#             channel_idx = 0
-#         elif vert_name == 'C2':
-#             channel_idx = 1
-#         else:  # C3, C4, C5, C6, C7
-#             channel_idx = 2
+            # Scale proposals to feature map coordinates
+            scaled_proposals = batch_proposals * self.spatial_scale
 
-#         # Fill this 3D region with confidence-weighted value
-#         attention_mask[channel_idx, z1:z2, y1:y2, x1:x2] = confidence
+            for proposal in scaled_proposals:
+                x1, y1, z1, x2, y2, z2 = proposal
 
-#     # Background channel (channel 3): 1.0 where sum of other channels is 0
-#     vertebra_coverage = attention_mask[0:3].sum(axis=0)
-#     attention_mask[3] = (vertebra_coverage == 0).astype(np.float32)
+                # Create sampling grid for this RoI
+                # Generate normalized coordinates (-1 to 1) for grid_sample
+                z_coords = torch.linspace(z1, z2, D_out, device=features.device)
+                y_coords = torch.linspace(y1, y2, H_out, device=features.device)
+                x_coords = torch.linspace(x1, x2, W_out, device=features.device)
 
-#     # Normalize each voxel so weights sum to 1 (for proper weighted blending)
-#     total_weight = attention_mask.sum(axis=0, keepdims=True)
-#     total_weight = np.maximum(total_weight, 1e-6)  # Avoid division by zero
-#     attention_mask = attention_mask / total_weight
+                # Normalize to [-1, 1] for grid_sample
+                z_coords_norm = 2.0 * z_coords / (D - 1) - 1.0
+                y_coords_norm = 2.0 * y_coords / (H - 1) - 1.0
+                x_coords_norm = 2.0 * x_coords / (W - 1) - 1.0
 
-#     # Statistics
-#     c1_coverage = (attention_mask[0] > 0).sum() / (D * H * W) * 100
-#     c2_coverage = (attention_mask[1] > 0).sum() / (D * H * W) * 100
-#     c3_c7_coverage = (attention_mask[2] > 0).sum() / (D * H * W) * 100
-#     bg_coverage = (attention_mask[3] > 0).sum() / (D * H * W) * 100
+                # Create meshgrid
+                grid_z, grid_y, grid_x = torch.meshgrid(z_coords_norm, y_coords_norm, x_coords_norm, indexing='ij')
+                grid = torch.stack([grid_x, grid_y, grid_z], dim=-1).unsqueeze(0)  # (1, D_out, H_out, W_out, 3)
 
-#     print(f"  Attention mask coverage (confidence-weighted):")
-#     print(f"    C1: {c1_coverage:.1f}%")
-#     print(f"    C2: {c2_coverage:.1f}%")
-#     print(f"    C3-C7: {c3_c7_coverage:.1f}%")
-#     print(f"    Background: {bg_coverage:.1f}%")
+                # Sample features using trilinear interpolation
+                roi_feature = F.grid_sample(
+                    features[batch_idx:batch_idx+1],
+                    grid,
+                    mode='bilinear',
+                    padding_mode='zeros',
+                    align_corners=True
+                )  # (1, C, D_out, H_out, W_out)
 
-#     return attention_mask
+                roi_features_list.append(roi_feature.squeeze(0))
+
+        if len(roi_features_list) == 0:
+            # No proposals, return empty tensor
+            return torch.zeros(0, C, D_out, H_out, W_out, device=features.device)
+
+        return torch.stack(roi_features_list, dim=0)
+
+
+class FasterRCNNHead3D(nn.Module):
+    """
+    3D Faster R-CNN detection head.
+    Classifies proposals and refines bounding boxes.
+    """
+    def __init__(self, in_channels, num_classes=8, roi_size=(7, 7, 7)):
+        """
+        Args:
+            in_channels: Number of RoI feature channels
+            num_classes: Number of vertebra classes (C1-C7 + background)
+            roi_size: Size of RoI features (D, H, W)
+        """
+        super(FasterRCNNHead3D, self).__init__()
+
+        self.num_classes = num_classes
+
+        # Feature compression
+        roi_flatten_size = in_channels * roi_size[0] * roi_size[1] * roi_size[2]
+        self.fc1 = nn.Linear(roi_flatten_size, 1024)
+        self.fc2 = nn.Linear(1024, 1024)
+
+        # Classification head
+        self.cls_score = nn.Linear(1024, num_classes)
+
+        # Box regression head (6 values per class: dx, dy, dz, dw, dh, dd)
+        self.bbox_pred = nn.Linear(1024, num_classes * 6)
+
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(0.5)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        nn.init.normal_(self.fc1.weight, std=0.01)
+        nn.init.normal_(self.fc2.weight, std=0.01)
+        nn.init.normal_(self.cls_score.weight, std=0.01)
+        nn.init.normal_(self.bbox_pred.weight, std=0.001)
+
+        for m in [self.fc1, self.fc2, self.cls_score, self.bbox_pred]:
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, roi_features):
+        """
+        Args:
+            roi_features: (N, C, D, H, W) RoI features
+
+        Returns:
+            class_logits: (N, num_classes) classification scores
+            bbox_deltas: (N, num_classes * 6) bbox refinements
+        """
+        # Flatten RoI features
+        x = roi_features.flatten(start_dim=1)
+
+        # Fully connected layers
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc2(x))
+        x = self.dropout(x)
+
+        # Classification and regression
+        class_logits = self.cls_score(x)
+        bbox_deltas = self.bbox_pred(x)
+
+        return class_logits, bbox_deltas
+
+
+class FasterRCNN3D(nn.Module):
+    """
+    Complete 3D Faster R-CNN for cervical vertebra detection.
+
+    Architecture:
+    1. Backbone: Shares features with main segmentation network
+    2. RPN: Proposes candidate vertebra regions
+    3. RoI Align: Extracts fixed-size features from proposals
+    4. Detection Head: Classifies vertebrae (C1-C7) and refines boxes
+    """
+    def __init__(
+        self,
+        in_channels=32,
+        num_classes=8,  # C1-C7 + background
+        rpn_num_anchors=9,
+        roi_size=(7, 7, 7),
+        nms_threshold=0.5,
+        score_threshold=0.25
+    ):
+        super(FasterRCNN3D, self).__init__()
+
+        self.num_classes = num_classes
+        self.nms_threshold = nms_threshold
+        self.score_threshold = score_threshold
+
+        # Region Proposal Network
+        self.rpn = RegionProposalNetwork3D(in_channels, num_anchors=rpn_num_anchors)
+
+        # RoI Align
+        self.roi_align = RoIAlign3D(output_size=roi_size, spatial_scale=1.0)
+
+        # Detection head
+        self.detection_head = FasterRCNNHead3D(in_channels, num_classes, roi_size)
+
+        # Anchor generation parameters
+        self.anchor_sizes = [(16, 16, 16), (32, 32, 32), (64, 64, 64)]  # Small, medium, large vertebrae
+        self.aspect_ratios = [(1.0, 1.0, 1.0), (1.0, 1.0, 1.5), (1.0, 1.0, 2.0)]  # Vertebrae are elongated in Z
+
+    def generate_anchors(self, feature_shape, device):
+        """
+        Generate 3D anchor boxes on feature map.
+
+        Args:
+            feature_shape: (D, H, W) shape of feature map
+            device: torch device
+
+        Returns:
+            anchors: (N, 6) tensor [x1, y1, z1, x2, y2, z2]
+        """
+        D, H, W = feature_shape
+        anchors = []
+
+        # Generate anchors at each spatial location
+        for z in range(D):
+            for y in range(H):
+                for x in range(W):
+                    cx, cy, cz = x, y, z
+
+                    # Generate anchors with different sizes and aspect ratios
+                    for size in self.anchor_sizes:
+                        for ratio in self.aspect_ratios:
+                            w = size[0] * ratio[0]
+                            h = size[1] * ratio[1]
+                            d = size[2] * ratio[2]
+
+                            x1 = cx - w / 2
+                            y1 = cy - h / 2
+                            z1 = cz - d / 2
+                            x2 = cx + w / 2
+                            y2 = cy + h / 2
+                            z2 = cz + d / 2
+
+                            anchors.append([x1, y1, z1, x2, y2, z2])
+
+        return torch.tensor(anchors, device=device, dtype=torch.float32)
+
+    def forward(self, features, targets=None):
+        """
+        Args:
+            features: (B, C, D, H, W) feature map from encoder
+            targets: Optional training targets
+
+        Returns:
+            detections: List of dicts with keys 'boxes', 'labels', 'scores'
+        """
+        B, C, D, H, W = features.shape
+
+        # 1. Region Proposal Network
+        objectness, bbox_deltas = self.rpn(features)
+
+        # 2. Generate anchors
+        anchors = self.generate_anchors((D, H, W), features.device)
+
+        # 3. Generate proposals from RPN output
+        proposals = self._generate_proposals(objectness, bbox_deltas, anchors, (D, H, W))
+
+        # 4. RoI Align
+        roi_features = self.roi_align(features, proposals)
+
+        # 5. Detection head
+        if roi_features.shape[0] > 0:
+            class_logits, bbox_deltas_refined = self.detection_head(roi_features)
+
+            # 6. Post-processing: NMS and score filtering
+            detections = self._postprocess_detections(
+                class_logits, bbox_deltas_refined, proposals, (D, H, W)
+            )
+        else:
+            # No proposals
+            detections = [{'boxes': torch.zeros(0, 6, device=features.device),
+                          'labels': torch.zeros(0, dtype=torch.long, device=features.device),
+                          'scores': torch.zeros(0, device=features.device)}
+                         for _ in range(B)]
+
+        return detections
+
+    def _generate_proposals(self, objectness, bbox_deltas, anchors, feature_shape):
+        """Generate proposals from RPN outputs (simplified for inference)."""
+        # This is a simplified implementation
+        # In practice, you'd implement proper proposal generation with NMS
+        B = objectness.shape[0]
+        proposals = []
+
+        for b in range(B):
+            # Take top-k objectness scores
+            obj_scores = objectness[b].flatten()
+            top_k = min(100, obj_scores.shape[0])
+            top_indices = torch.topk(obj_scores, top_k).indices
+
+            # Select corresponding anchors
+            batch_proposals = anchors[top_indices % anchors.shape[0]]
+            proposals.append(batch_proposals)
+
+        return proposals
+
+    def _postprocess_detections(self, class_logits, bbox_deltas, proposals, feature_shape):
+        """Apply NMS and score thresholding (simplified)."""
+        # Simplified post-processing
+        # In practice, implement proper NMS and bbox refinement
+        scores = F.softmax(class_logits, dim=1)
+        max_scores, labels = scores[:, 1:].max(dim=1)  # Exclude background
+        labels = labels + 1  # Offset for background class
+
+        # Filter by score threshold
+        keep = max_scores > self.score_threshold
+
+        detections = []
+        # Simplified: return one detection dict
+        # In practice, split by batch
+        detections.append({
+            'boxes': torch.cat([p for p in proposals], dim=0)[keep],
+            'labels': labels[keep],
+            'scores': max_scores[keep]
+        })
+
+        return detections
+
+
+def generate_faster_rcnn_attention_mask(
+    volume_3d: np.ndarray,
+    faster_rcnn_model: FasterRCNN3D,
+    features: torch.Tensor,
+    conf_threshold: float = 0.25,
+    device: str = 'cuda'
+) -> np.ndarray:
+    """
+    Generate confidence-weighted 3D attention mask using 3D Faster R-CNN.
+
+    Args:
+        volume_3d: Preprocessed 3D volume, shape (C, D, H, W) or (D, H, W)
+        faster_rcnn_model: Trained 3D Faster R-CNN model
+        features: Feature map from encoder (B, C, D, H, W)
+        conf_threshold: Detection confidence threshold
+        device: Device for inference
+
+    Returns:
+        attention_mask: 4D array shape (4, D, H, W), dtype float32
+    """
+    # Handle channel dimension
+    if volume_3d.ndim == 4:
+        volume = volume_3d[0]
+    else:
+        volume = volume_3d
+
+    D, H, W = volume.shape
+
+    # Run 3D Faster R-CNN
+    faster_rcnn_model.eval()
+    with torch.no_grad():
+        detections = faster_rcnn_model(features)
+
+    # Convert detections to vertebrae_3d format
+    vertebrae_3d = {}
+    vertebra_names = ['background', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7']
+
+    for detection in detections:
+        boxes = detection['boxes'].cpu().numpy()
+        labels = detection['labels'].cpu().numpy()
+        scores = detection['scores'].cpu().numpy()
+
+        for box, label, score in zip(boxes, labels, scores):
+            if score < conf_threshold:
+                continue
+
+            vert_name = vertebra_names[label]
+            if vert_name == 'background':
+                continue
+
+            x1, y1, z1, x2, y2, z2 = box
+
+            vertebrae_3d[vert_name] = {
+                'bbox': [int(x1), int(x2), int(y1), int(y2), int(z1), int(z2)],
+                'confidence': float(score)
+            }
+
+    # Create attention mask
+    attention_mask = create_attention_mask_from_vertebrae(vertebrae_3d, (D, H, W))
+
+    return attention_mask
+
+
+def create_attention_mask_from_vertebrae(
+    vertebrae_3d: Dict[str, Dict],
+    volume_shape: Tuple[int, int, int]
+) -> np.ndarray:
+    """
+    Create confidence-weighted 3D attention mask from vertebra bounding boxes.
+
+    Returns 4-channel mask:
+    - Channel 0: C1 regions (confidence-weighted)
+    - Channel 1: C2 regions (confidence-weighted)
+    - Channel 2: C3-C7 regions (confidence-weighted)
+    - Channel 3: Background (1.0 where no vertebra detected)
+
+    Args:
+        vertebrae_3d: Dict mapping vertebra name -> {'bbox': [...], 'confidence': float}
+        volume_shape: (D, H, W)
+
+    Returns:
+        attention_mask: 4D array (4, D, H, W), dtype float32
+    """
+    D, H, W = volume_shape
+    attention_mask = np.zeros((4, D, H, W), dtype=np.float32)
+
+    for vert_name, vert_data in vertebrae_3d.items():
+        x1, x2, y1, y2, z1, z2 = vert_data['bbox']
+        confidence = vert_data['confidence']
+
+        # Clamp to volume bounds
+        x1 = int(max(0, min(W, x1)))
+        x2 = int(max(0, min(W, x2)))
+        y1 = int(max(0, min(H, y1)))
+        y2 = int(max(0, min(H, y2)))
+        z1 = int(max(0, min(D, z1)))
+        z2 = int(max(0, min(D, z2)))
+
+        # Determine attention channel
+        if vert_name == 'C1':
+            channel_idx = 0
+        elif vert_name == 'C2':
+            channel_idx = 1
+        else:  # C3, C4, C5, C6, C7
+            channel_idx = 2
+
+        # Fill with confidence-weighted value
+        attention_mask[channel_idx, z1:z2, y1:y2, x1:x2] = confidence
+
+    # Background channel
+    vertebra_coverage = attention_mask[0:3].sum(axis=0)
+    attention_mask[3] = (vertebra_coverage == 0).astype(np.float32)
+
+    # Normalize so weights sum to 1
+    total_weight = attention_mask.sum(axis=0, keepdims=True)
+    total_weight = np.maximum(total_weight, 1e-6)
+    attention_mask = attention_mask / total_weight
+
+    # Statistics
+    c1_coverage = (attention_mask[0] > 0).sum() / (D * H * W) * 100
+    c2_coverage = (attention_mask[1] > 0).sum() / (D * H * W) * 100
+    c3_c7_coverage = (attention_mask[2] > 0).sum() / (D * H * W) * 100
+    bg_coverage = (attention_mask[3] > 0).sum() / (D * H * W) * 100
+
+    print(f"  Attention mask coverage (Faster R-CNN):")
+    print(f"    C1: {c1_coverage:.1f}%")
+    print(f"    C2: {c2_coverage:.1f}%")
+    print(f"    C3-C7: {c3_c7_coverage:.1f}%")
+    print(f"    Background: {bg_coverage:.1f}%")
+
+    return attention_mask
 
 
 # ============================================================================
@@ -488,28 +760,85 @@ class DetectorGuidedCervicalAttention3D(nn.Module):
 
         return attention_routing
 
-    def forward(self, x, attention_mask=None, case_id=None, detections=None):
+    def forward(self, x, attention_mask=None, case_id=None, detections=None, faster_rcnn_model=None):
         """
-        Apply scSE attention (optimized for YOLO-disabled mode).
-
-        Since YOLO is disabled, this directly applies C3-C7 scSE attention
-        without computing unused C1/C2 pathways (~30% faster).
+        Apply detector-guided or uniform scSE attention based on USE_FASTER_RCNN_ATTENTION switch.
 
         Args:
             x: Input features (B, C, D, H, W)
-            attention_mask: YOLO attention mask (unused, kept for compatibility)
-            case_id: Case identifier (unused, kept for compatibility)
-            detections: Detection dict (unused, kept for compatibility)
+            attention_mask: Pre-computed attention mask (optional)
+            case_id: Case identifier (optional)
+            detections: Detection dict (optional)
+            faster_rcnn_model: Trained FasterRCNN3D model (optional)
 
         Returns:
             attended: Attention-weighted features (B, C, D, H, W)
-            attention_routing: None (no routing with YOLO disabled)
+            attention_routing: Routing map if detector used, else None
         """
-        # YOLO disabled: directly apply C3-C7 scSE attention
-        # This skips computing C1/C2 attention pathways that would be multiplied by 0
-        attended = self.c3_c7_attention(x)
+        # Check global switch
+        if not USE_FASTER_RCNN_ATTENTION:
+            # Fallback: uniform C3-C7 scSE attention everywhere
+            attended = self.c3_c7_attention(x)
+            return attended, None
 
-        return attended, None
+        # Faster R-CNN enabled: use detector-guided attention
+        if faster_rcnn_model is not None:
+            # Generate detections from current features
+            with torch.no_grad():
+                detections_list = faster_rcnn_model(x)
+
+            # Create spatial attention routing map
+            B, C, D, H, W = x.shape
+            attention_routing = torch.zeros(B, 3, D, H, W, device=x.device, dtype=torch.float32)
+
+            # Convert detections to routing map
+            vertebra_names = ['background', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7']
+
+            for batch_idx, detection in enumerate(detections_list):
+                boxes = detection['boxes']
+                labels = detection['labels']
+                scores = detection['scores']
+
+                for box, label, score in zip(boxes, labels, scores):
+                    if label == 0:  # Skip background
+                        continue
+
+                    vert_name = vertebra_names[label]
+                    x1, y1, z1, x2, y2, z2 = box
+
+                    # Clamp to feature map bounds
+                    x1, x2 = int(max(0, x1)), int(min(W, x2))
+                    y1, y2 = int(max(0, y1)), int(min(H, y2))
+                    z1, z2 = int(max(0, z1)), int(min(D, z2))
+
+                    # Determine attention channel
+                    if vert_name == 'C1':
+                        channel_idx = 0
+                    elif vert_name == 'C2':
+                        channel_idx = 1
+                    else:  # C3-C7
+                        channel_idx = 2
+
+                    # Mark this region (confidence-weighted)
+                    attention_routing[batch_idx, channel_idx, z1:z2, y1:y2, x1:x2] = score
+
+            # Normalize routing (ensure sum to 1)
+            total_weight = attention_routing.sum(dim=1, keepdim=True)
+            total_weight = torch.clamp(total_weight, min=1e-6)
+            attention_routing = attention_routing / total_weight
+
+            # Apply vertebra-specific attention
+            c1_attended = self.c1_attention(x) * attention_routing[:, 0:1]
+            c2_attended = self.c2_attention(x) * attention_routing[:, 1:2]
+            c3_c7_attended = self.c3_c7_attention(x) * attention_routing[:, 2:3]
+
+            attended = c1_attended + c2_attended + c3_c7_attended
+            return attended, attention_routing
+
+        else:
+            # No detector model provided, fall back
+            attended = self.c3_c7_attention(x)
+            return attended, None
 
 
 class SimpleCervicalAttention3D(nn.Module):
