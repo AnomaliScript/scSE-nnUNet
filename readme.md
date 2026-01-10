@@ -1,11 +1,36 @@
-# scSE-nnUNet: Cervical Spine Segmentation with Level-Aware Attention
+# scSE-nnUNet: Cervical Spine Segmentation with Attention Mechanisms
+Modified version of nnUNet exploring optimal attention placement for cervical spine segmentation.
 
-Modified version of nnUNet with cervical-specific attention mechanisms for surgical path planning.
+## Project Evolution
 
-## Novel Contributions
-- Cervical level-aware attention mechanism (C1, C2, C3-C7)
-- Integration of scSE blocks in skip connections
-- Specialized architecture for vertebrae segmentation
+### Initial Hypothesis (Not Implemented)
+Originally planned cervical level-aware attention with vertebra-specific pathways (C1/C2/C3-C7). 
+Due to **the failure of implementing YOLOv11 to serve as a classifier for vertebrae because of limited high-quality cervical data to train both the YOLO classifier and the origina scSE-nnUNet**, this approach was not pursued.
+
+### Actual Implementation
+Systematic evaluation of scSE attention block placement within nnUNet architecture:
+
+1. **Baseline**: ResEnc nnUNet (no attention) - 0.83 DSC
+2. **Configuration 1**: scSE in skip connections only - 0.83 DSC (no improvement)
+3. **Configuration 2**: scSE in decoder + bottleneck - 0.88 DSC (+5% improvement)
+
+## Key Findings
+- Skip connection attention alone did not improve segmentation performance
+- Decoder + bottleneck attention significantly improved C6/C7 boundary precision
+- Lower cervical vertebrae (C6/C7) showed greatest improvement (+4.2% DSC)
+- Demonstrates importance of attention placement for boundary refinement tasks
+
+## Technical Details
+- Based on nnU-Net v2 architecture
+- Integrated scSE (concurrent Spatial and Channel Squeeze-and-Excitation) blocks
+- Focus on cervical vertebrae (C1-C7) segmentation from CT scans
+
+## Results
+| Configuration | Overall DSC | C7 DSC |
+|--------------|-------------|---------|
+| Baseline (no attention) | 0.830 | 0.840 |
+| Skip connections | 0.830 | 0.840 |
+| Decoder + Bottleneck | 0.880 | 0.882 |
 
 ## Original Work
 This project is based on [nnU-Net](https://github.com/MIC-DKFZ/nnUNet) by Fabian Isensee et al.
@@ -15,67 +40,7 @@ This project maintains the original Apache 2.0 License from nnUNet. See LICENSE 
 
 Modifications and additions © 2025 Brandon Kim
 
-## Citation
-If you use this work, please cite both:
-- The original nnUNet paper (Isensee et al.)
-- Roy et al. (2018) for scSE attention mechanisms
-
-
-
-# v1.1: Cervical Level-Aware Attention with Soft Weighting
-
-#### Context
-
-Cervical vertebrae exhibit distinct anatomical characteristics:
-- **C1 (atlas)**: Lacks a vertebral body; has a unique ring structure
-- **C2 (axis)**: Features the odontoid process (dens), a distinctive superior projection
-- **C3-C7**: Share similar rectangular vertebral body morphology
-
-The past version treated all vertebrae uniformly, ignoring these anatomical 
-differences. This version addresses this by applying vertebra-specific attention pathways.
-
-#### Technical Implementation
-
-The system consists of three components:
-
-1. **Vertebra-Level Classifier**: A lightweight neural network that analyzes encoder 
-   features and predicts probability distributions over three vertebra groups: 
-   P(C1), P(C2), P(C3-C7)
-
-2. **Anatomically-Informed Attention Pathways**:
-   - **C1 pathway**: Spatial attention only (emphasizes structural relationships)
-   - **C2 pathway**: Enhanced scSE with increased capacity (captures unique dens features)
-   - **C3-C7 pathway**: Standard scSE (sufficient for similar anatomy)
-
-3. **Soft Weighting Mechanism**: Rather than using hard selection (if-else logic), 
-   the system blends all three pathway outputs using the predicted probabilities:
-```
-   Output = P(C1) × C1_attention + P(C2) × C2_attention + P(C3-C7) × C3-C7_attention
-```
-
-#### Advantages of Soft Weighting
-
-- **Robustness**: Handles classifier uncertainty gracefully (e.g., if 60% confident 
-  in C2, still applies 40% of other pathways)
-- **Mixed Regions**: Naturally handles cases where multiple vertebrae appear in the 
-  same receptive field
-- **Training Stability**: Allows gradients to flow through all pathways, enabling 
-  continuous learning across all attention mechanisms
-- **No Hard Boundaries**: Avoids abrupt transitions between attention types
-
-#### Integration with nnU-Net
-
-The attention modules are integrated into nnU-Net's skip connections, following 
-Roy et al.'s finding that skip connection integration outperforms post-encoder placement 
-for medical imaging tasks. This allows the decoder to receive anatomically-refined 
-features that emphasize relevant characteristics for each vertebra type.
-
-#### Learning Process
-
-During training, the vertebra-level classifier learns to identify cervical levels 
-through the segmentation loss signal. When the classifier misidentifies a vertebra 
-(e.g., predicts C1 but ground truth shows C2), the resulting poor segmentation 
-produces high loss, and backpropagation adjusts the classifier weights to improve 
-future predictions. The soft weighting ensures that even imperfect classifications 
-still contribute appropriate attention, preventing catastrophic failures from 
-misclassification.
+## Citations
+If you use this work, please cite:
+- Isensee et al. - nnU-Net (original architecture)
+- Roy et al. (2018) - scSE attention mechanisms
