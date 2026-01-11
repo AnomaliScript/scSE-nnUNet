@@ -14,6 +14,7 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
 # from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetWithYOLOAttention  # YOLO: Plan B
 # from nnunetv2.training.dataloading.data_loader import nnUNetDataLoaderWithYOLO  # YOLO: Plan B
+from torch import nn
 import torch
 from typing import Union, List, Tuple
 import sys
