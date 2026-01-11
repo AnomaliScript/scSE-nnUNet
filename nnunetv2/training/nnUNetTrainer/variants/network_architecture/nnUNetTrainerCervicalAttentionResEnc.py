@@ -1,18 +1,10 @@
 """
-nnU-Net Trainer with Cervical Level-Aware Attention (Bottleneck + Decoder)
+nnU-Net Trainer with Cervical Level-Aware Attention (Skip Connections + Bottleneck + Decoder)
 
 Custom trainer that integrates anatomically-informed attention mechanisms into
 nnU-Net's ResidualEncoderUNet architecture for cervical spine segmentation.
 
-Key modifications:
-1. Adds DetectorGuidedCervicalAttention3D to bottleneck (deepest encoder layer)
-2. Adds DetectorGuidedCervicalAttention3D to all decoder blocks (boundary refinement)
-3. Skip connections remain UNCHANGED for direct gradient flow
-4. Class-weighted loss: Gradient weighting for C3-C7 (1.5x for C3-C5, 2.5x for C6-C7)
-5. Maintains full compatibility with nnU-Net's training pipeline
-
-NOTE: YOLO vertebra detector integration is currently disabled (Plan B).
-      Testing scSE attention alone first.
+Maintains full compatibility with nnU-Net's training pipeline
 
 Author: Brandon K (@AnomaliScript)
 Date: 2025
@@ -36,7 +28,10 @@ from scse_modules import (
     DetectorGuidedCervicalAttention3D,
     FasterRCNN3D,
     USE_FASTER_RCNN_ATTENTION,
-    FASTER_RCNN_WEIGHTS_PATH
+    FASTER_RCNN_WEIGHTS_PATH,
+    USE_SKIP_CONNECTION_ATTENTION,
+    USE_BOTTLENECK_ATTENTION,
+    USE_DECODER_ATTENTION
 )
 
 
@@ -84,7 +79,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         # Attach Faster R-CNN to network (if loaded)
         if hasattr(self, 'faster_rcnn_model') and self.faster_rcnn_model is not None:
             self.network.faster_rcnn_model = self.faster_rcnn_model
-            print(f"   📎 Faster R-CNN attached to network")
+            print(f"   Faster R-CNN attached to network")
 
         # YOLO: Plan B (commented out)
         # self.pregenerate_yolo_masks()
@@ -97,11 +92,11 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         self.faster_rcnn_model = None
 
         if not USE_FASTER_RCNN_ATTENTION:
-            print("\n🔘 Faster R-CNN attention: DISABLED (using fallback uniform attention)")
+            print("\nFaster R-CNN attention: DISABLED (using fallback uniform attention)")
             print("   To enable: Set USE_FASTER_RCNN_ATTENTION = True in scse_modules.py")
             return
 
-        print("\n🔍 Faster R-CNN attention: ENABLED")
+        print("\nFaster R-CNN attention: ENABLED")
         print(f"   Looking for weights at: {FASTER_RCNN_WEIGHTS_PATH}")
 
         # Resolve path
@@ -113,7 +108,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             weights_path = nnunetv2_root / FASTER_RCNN_WEIGHTS_PATH
 
         if not weights_path.exists():
-            print(f"   ⚠️  WARNING: Weights file not found!")
+            print(f"   WARNING: Weights file not found!")
             print(f"   Expected location: {weights_path}")
             print(f"   Falling back to uniform attention")
             return
@@ -138,12 +133,12 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             for param in self.faster_rcnn_model.parameters():
                 param.requires_grad = False
 
-            print(f"   ✅ Faster R-CNN loaded successfully!")
+            print(f"   Faster R-CNN loaded successfully!")
             print(f"   Device: {self.device}")
             print(f"   Mode: Frozen (inference only)")
 
         except Exception as e:
-            print(f"   ⚠️  ERROR loading Faster R-CNN: {e}")
+            print(f"   ERROR loading Faster R-CNN: {e}")
             print(f"   Falling back to uniform attention")
             self.faster_rcnn_model = None
 
@@ -259,7 +254,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         class_weights[6] = 2.5  # C6: 2.5x weight (proximity to shoulders)
         class_weights[7] = 2.5  # C7: 2.5x weight (most challenging)
 
-        print(f"\n🎯 Class-weighted loss configured:")
+        print(f"\nClass-weighted loss configured:")
         print(f"   C1-C2: 1.0x weight (standard - distinct anatomy)")
         print(f"   C3-C5: 1.5x weight (moderate - mid-cervical)")
         print(f"   C6-C7: 2.5x weight (high - challenging + critical)")
@@ -348,7 +343,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             deep_supervision=enable_deep_supervision
         )
 
-        print("🎯 Building ResidualEncoderUNet with Bottleneck + Decoder Cervical Attention...")
+        print("Building ResidualEncoderUNet with Bottleneck + Decoder Cervical Attention...")
 
         # Step 2: Create attention modules for BOTTLENECK and DECODER blocks
         n_stages = len(network.encoder.stages)
@@ -356,54 +351,91 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         features_per_stage = arch_init_kwargs.get('features_per_stage', [])
 
         # Bottleneck attention (deepest encoder layer)
-        print("\n📌 BOTTLENECK ATTENTION:")
-        try:
-            # Bottleneck is the last encoder stage
-            bottleneck_channels = features_per_stage[-1] if len(features_per_stage) > 0 else 320
-            bottleneck_attention = DetectorGuidedCervicalAttention3D(
-                num_channels=bottleneck_channels,
-                reduction_ratio=2
-            )
-            print(f"  ✅ Bottleneck: {bottleneck_channels} channels")
-        except Exception as e:
-            print(f"  ⚠️ Bottleneck: Failed - {e}")
-            bottleneck_attention = None
+        bottleneck_attention = None
+
+        if USE_BOTTLENECK_ATTENTION:
+            print("\nBOTTLENECK ATTENTION:")
+            try:
+                # Bottleneck is the last encoder stage
+                bottleneck_channels = features_per_stage[-1] if len(features_per_stage) > 0 else 320
+                bottleneck_attention = DetectorGuidedCervicalAttention3D(
+                    num_channels=bottleneck_channels,
+                    reduction_ratio=2
+                )
+                print(f"  Bottleneck: {bottleneck_channels} channels")
+            except Exception as e:
+                print(f"  Bottleneck: Failed - {e}")
+                bottleneck_attention = None
+        else:
+            print("\nBottleneck attention: DISABLED")
+            print("   To enable: Set USE_BOTTLENECK_ATTENTION = True in scse_modules.py")
 
         # Decoder block attention (after concatenation + conv)
         decoder_attention_modules = nn.ModuleList()
 
-        print("\n📌 DECODER BLOCK ATTENTION:")
-        for s in range(n_decoder_stages):
-            try:
-                decoder_stage = network.decoder.stages[s]
+        if USE_DECODER_ATTENTION:
+            print("\nDECODER BLOCK ATTENTION:")
+            for s in range(n_decoder_stages):
+                try:
+                    decoder_stage = network.decoder.stages[s]
 
-                # Get output channels from the last conv in this decoder stage
-                if hasattr(decoder_stage, 'blocks') and len(decoder_stage.blocks) > 0:
-                    last_block = decoder_stage.blocks[-1]
-                    if hasattr(last_block, 'conv') and hasattr(last_block.conv, 'out_channels'):
-                        num_channels = last_block.conv.out_channels
+                    # Get output channels from the last conv in this decoder stage
+                    if hasattr(decoder_stage, 'blocks') and len(decoder_stage.blocks) > 0:
+                        last_block = decoder_stage.blocks[-1]
+                        if hasattr(last_block, 'conv') and hasattr(last_block.conv, 'out_channels'):
+                            num_channels = last_block.conv.out_channels
+                        else:
+                            # Fallback: use features_per_stage in reverse
+                            encoder_stage_idx = n_stages - 2 - s
+                            num_channels = features_per_stage[encoder_stage_idx] if encoder_stage_idx >= 0 else 32
                     else:
-                        # Fallback: use features_per_stage in reverse
                         encoder_stage_idx = n_stages - 2 - s
                         num_channels = features_per_stage[encoder_stage_idx] if encoder_stage_idx >= 0 else 32
-                else:
-                    encoder_stage_idx = n_stages - 2 - s
-                    num_channels = features_per_stage[encoder_stage_idx] if encoder_stage_idx >= 0 else 32
 
-                attention = DetectorGuidedCervicalAttention3D(
-                    num_channels=num_channels,
-                    reduction_ratio=2
-                )
-                decoder_attention_modules.append(attention)
-                print(f"  ✅ Decoder {s}: {num_channels} channels")
+                    attention = DetectorGuidedCervicalAttention3D(
+                        num_channels=num_channels,
+                        reduction_ratio=2
+                    )
+                    decoder_attention_modules.append(attention)
+                    print(f"  Decoder {s}: {num_channels} channels")
 
-            except Exception as e:
-                print(f"  ⚠️ Decoder {s}: Failed - {e}")
-                decoder_attention_modules.append(None)
+                except Exception as e:
+                    print(f"  Decoder {s}: Failed - {e}")
+                    decoder_attention_modules.append(None)
+        else:
+            print("\nDecoder attention: DISABLED")
+            print("   To enable: Set USE_DECODER_ATTENTION = True in scse_modules.py")
+
+        # Skip connection attention (OPTIONAL - controlled by USE_SKIP_CONNECTION_ATTENTION)
+        skip_attention_modules = nn.ModuleList()
+
+        if USE_SKIP_CONNECTION_ATTENTION:
+            print("\nSKIP CONNECTION ATTENTION:")
+            # Create attention for each encoder stage (except bottleneck)
+            # Skip connections go from encoder stages to decoder
+            for s in range(n_stages - 1):  # -1 because bottleneck doesn't have skip
+                try:
+                    # Get encoder stage channels
+                    num_channels = features_per_stage[s] if s < len(features_per_stage) else 32
+
+                    attention = DetectorGuidedCervicalAttention3D(
+                        num_channels=num_channels,
+                        reduction_ratio=2
+                    )
+                    skip_attention_modules.append(attention)
+                    print(f"  Skip {s}: {num_channels} channels")
+
+                except Exception as e:
+                    print(f"  Skip {s}: Failed - {e}")
+                    skip_attention_modules.append(None)
+        else:
+            print("\nSkip connection attention: DISABLED")
+            print("   To enable: Set USE_SKIP_CONNECTION_ATTENTION = True in scse_modules.py")
 
         # Step 3: Attach attention modules and mask placeholder to network
         network.bottleneck_attention = bottleneck_attention
         network.decoder_attention_modules = decoder_attention_modules
+        network.skip_attention_modules = skip_attention_modules
         network.current_attention_mask = None
         network.faster_rcnn_model = None  # Will be set by trainer
 
@@ -414,10 +446,10 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
 
         def decoder_forward_with_bottleneck_decoder_attention(skips):
             """
-            Modified decoder with bottleneck + decoder attention:
+            Modified decoder with bottleneck + decoder + optional skip attention:
             1. Apply attention to bottleneck (deepest features)
-            2. Apply attention to each decoder block (boundary refinement)
-            3. Skip connections pass through UNCHANGED
+            2. Apply attention to skip connections (if enabled)
+            3. Apply attention to each decoder block (boundary refinement)
 
             Args:
                 skips: List of encoder outputs [stage0, stage1, ..., bottleneck]
@@ -428,7 +460,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             attention_mask = getattr(network, 'current_attention_mask', None)
             faster_rcnn_model = getattr(network, 'faster_rcnn_model', None)
 
-            # PHASE 1: Apply attention to BOTTLENECK only
+            # PHASE 1: Apply attention to BOTTLENECK
             bottleneck = skips[-1]
             if network.bottleneck_attention is not None:
                 bottleneck, _ = network.bottleneck_attention(
@@ -437,10 +469,23 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
                     faster_rcnn_model=faster_rcnn_model
                 )
 
-            # Skip connections pass through unchanged
-            modified_skips = skips[:-1] + [bottleneck]
+            # PHASE 2: Apply attention to SKIP CONNECTIONS (if enabled)
+            modified_skips = list(skips[:-1])  # All skips except bottleneck
 
-            # PHASE 2: Decoder forward with attention on decoder blocks
+            if hasattr(network, 'skip_attention_modules') and len(network.skip_attention_modules) > 0:
+                # Apply attention to each skip connection
+                for skip_idx in range(len(modified_skips)):
+                    if skip_idx < len(network.skip_attention_modules) and network.skip_attention_modules[skip_idx] is not None:
+                        modified_skips[skip_idx], _ = network.skip_attention_modules[skip_idx](
+                            modified_skips[skip_idx],
+                            attention_mask=attention_mask,
+                            faster_rcnn_model=faster_rcnn_model
+                        )
+
+            # Add processed bottleneck back
+            modified_skips = modified_skips + [bottleneck]
+
+            # PHASE 3: Decoder forward with attention on decoder blocks
             lres_input = modified_skips[-1]
             seg_outputs = []
 
@@ -448,7 +493,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
                 # Upsample
                 x = network.decoder.transpconvs[s](lres_input)
 
-                # Concatenate with skip (unmodified)
+                # Concatenate with skip (potentially attended)
                 x = torch.cat((x, modified_skips[-(s+2)]), 1)
 
                 # Decoder convolution block
@@ -481,10 +526,10 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         # Replace decoder's forward method
         network.decoder.forward = decoder_forward_with_bottleneck_decoder_attention
 
-        print("\n✅ Bottleneck + Decoder Cervical Attention integration complete!")
-        print(f"   Bottleneck attention: {'✓' if bottleneck_attention else '✗'}")
+        print("\nCervical Attention integration complete!")
+        print(f"   Bottleneck attention: {'ENABLED' if bottleneck_attention else 'DISABLED'}")
         print(f"   Decoder attention modules: {len(decoder_attention_modules)}")
-        print(f"   Skip connections: UNCHANGED (direct gradient flow)")
+        print(f"   Skip connection attention: {'ENABLED (' + str(len(skip_attention_modules)) + ' modules)' if len(skip_attention_modules) > 0 else 'DISABLED'}")
         print(f"   Architecture: {architecture_class_name}")
 
         return network
