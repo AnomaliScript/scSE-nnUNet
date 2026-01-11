@@ -25,7 +25,7 @@ import numpy as np
 
 # Import custom attention modules
 sys.path.append(str(Path(__file__).parent))
-from scse_modules import (
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.scse_modules import (
     DetectorGuidedCervicalAttention3D,
     FasterRCNN3D,
     USE_FASTER_RCNN_ATTENTION,
