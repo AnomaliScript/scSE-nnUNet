@@ -14,7 +14,7 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
 # from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetWithYOLOAttention  # YOLO: Plan B
 # from nnunetv2.training.dataloading.data_loader import nnUNetDataLoaderWithYOLO  # YOLO: Plan B
-from torch import nn
+import torch
 from typing import Union, List, Tuple
 import sys
 from pathlib import Path
@@ -43,8 +43,23 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
     Extends the base nnUNetTrainer to integrate scSE attention mechanisms
     into the bottleneck and decoder blocks.
 
-    YOLO integration is currently disabled (testing scSE attention alone).
+    Faster R-CNN integration is currently disabled (testing scSE attention alone).
     """
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        """
+        Initialize the cervical attention trainer.
+
+        Calls parent initialization and then sets custom training parameters.
+        """
+        # Call parent's __init__ first
+        super().__init__(plans, configuration, fold, dataset_json, device)
+
+        # Override training hyperparameters
+        self.num_epochs = 110  # Change this to desired number of epochs (default: 1000)
+
+        print(f"\nCervical Attention Trainer initialized with {self.num_epochs} epochs")
 
     def initialize(self):
         # YOLO: Plan B (commented out)
