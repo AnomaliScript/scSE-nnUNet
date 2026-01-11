@@ -31,7 +31,8 @@ from scse_modules import (
     FASTER_RCNN_WEIGHTS_PATH,
     USE_SKIP_CONNECTION_ATTENTION,
     USE_BOTTLENECK_ATTENTION,
-    USE_DECODER_ATTENTION
+    USE_DECODER_ATTENTION,
+    USE_ENCODER_ATTENTION
 )
 
 
@@ -432,10 +433,35 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             print("\nSkip connection attention: DISABLED")
             print("   To enable: Set USE_SKIP_CONNECTION_ATTENTION = True in scse_modules.py")
 
+        # Encoder attention (OPTIONAL - controlled by USE_ENCODER_ATTENTION)
+        encoder_attention_modules = nn.ModuleList()
+
+        if USE_ENCODER_ATTENTION:
+            print("\nENCODER ATTENTION:")
+            # Create attention for each encoder stage (excluding bottleneck - already has attention)
+            for s in range(n_stages - 1):  # -1 excludes bottleneck
+                try:
+                    num_channels = features_per_stage[s] if s < len(features_per_stage) else 32
+
+                    attention = DetectorGuidedCervicalAttention3D(
+                        num_channels=num_channels,
+                        reduction_ratio=2
+                    )
+                    encoder_attention_modules.append(attention)
+                    print(f"  Encoder {s}: {num_channels} channels")
+
+                except Exception as e:
+                    print(f"  Encoder {s}: Failed - {e}")
+                    encoder_attention_modules.append(None)
+        else:
+            print("\nEncoder attention: DISABLED")
+            print("   To enable: Set USE_ENCODER_ATTENTION = True in scse_modules.py")
+
         # Step 3: Attach attention modules and mask placeholder to network
         network.bottleneck_attention = bottleneck_attention
         network.decoder_attention_modules = decoder_attention_modules
         network.skip_attention_modules = skip_attention_modules
+        network.encoder_attention_modules = encoder_attention_modules
         network.current_attention_mask = None
         network.faster_rcnn_model = None  # Will be set by trainer
 
@@ -526,10 +552,58 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         # Replace decoder's forward method
         network.decoder.forward = decoder_forward_with_bottleneck_decoder_attention
 
+        # Step 5: Replace encoder forward to inject attention after conv blocks
+        def encoder_forward_with_attention(x):
+            """
+            Modified encoder with attention after each conv block (before pooling).
+
+            Standard encoder flow:
+                Input → Stage0 (conv) → Pool → Stage1 (conv) → Pool → ... → Bottleneck
+
+            With attention:
+                Input → Stage0 (conv) → Attention → Pool → Stage1 (conv) → Attention → Pool → ...
+
+            Args:
+                x: Input tensor
+
+            Returns:
+                skips: List of encoder outputs for decoder skip connections
+            """
+            skips = []
+            faster_rcnn_model = getattr(network, 'faster_rcnn_model', None)
+            attention_mask = getattr(network, 'current_attention_mask', None)
+
+            # Process each encoder stage
+            for s, stage in enumerate(network.encoder.stages):
+                x = stage(x)
+
+                # Apply encoder attention AFTER conv block, BEFORE pooling (if enabled)
+                if (hasattr(network, 'encoder_attention_modules') and
+                    s < len(network.encoder_attention_modules) and
+                    network.encoder_attention_modules[s] is not None):
+                    x, _ = network.encoder_attention_modules[s](
+                        x,
+                        attention_mask=attention_mask,
+                        faster_rcnn_model=faster_rcnn_model
+                    )
+
+                skips.append(x)
+
+                # Apply pooling AFTER attention (if not last stage)
+                if s < len(network.encoder.stages) - 1:  # Skip pooling on bottleneck
+                    if hasattr(network.encoder, 'pools') and s < len(network.encoder.pools):
+                        x = network.encoder.pools[s](x)
+
+            return skips
+
+        # Replace encoder's forward method
+        network.encoder.forward = encoder_forward_with_attention
+
         print("\nCervical Attention integration complete!")
         print(f"   Bottleneck attention: {'ENABLED' if bottleneck_attention else 'DISABLED'}")
         print(f"   Decoder attention modules: {len(decoder_attention_modules)}")
         print(f"   Skip connection attention: {'ENABLED (' + str(len(skip_attention_modules)) + ' modules)' if len(skip_attention_modules) > 0 else 'DISABLED'}")
+        print(f"   Encoder attention: {'ENABLED (' + str(len(encoder_attention_modules)) + ' modules)' if len(encoder_attention_modules) > 0 else 'DISABLED'}")
         print(f"   Architecture: {architecture_class_name}")
 
         return network
