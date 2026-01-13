@@ -34,7 +34,7 @@ FASTER_RCNN_WEIGHTS_PATH = "nnunetv2/training/pretrained_models/faster_rcnn_vert
 # Enable/disable scSE attention on skip connections
 # Set to True to apply attention to encoder skip connections before concatenation
 # Set to False to leave skip connections unchanged (current behavior)
-USE_SKIP_CONNECTION_ATTENTION = False  # <-- Edit this line for skip connection attention
+USE_SKIP_CONNECTION_ATTENTION = True  # <-- Edit this line for skip connection attention
 
 # Enable/disable scSE attention on bottleneck (deepest layer)
 # Set to True to apply attention to bottleneck features
