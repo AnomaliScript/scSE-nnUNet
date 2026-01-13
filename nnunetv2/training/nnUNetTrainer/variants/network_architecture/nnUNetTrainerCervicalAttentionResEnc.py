@@ -47,20 +47,20 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
     Faster R-CNN integration is currently disabled (testing scSE attention alone).
     """
 
-    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
-                 device: torch.device = torch.device('cuda')):
-        """
-        Initialize the cervical attention trainer.
+    # def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+    #              device: torch.device = torch.device('cuda')):
+    #     """
+    #     Initialize the cervical attention trainer.
 
-        Calls parent initialization and then sets custom training parameters.
-        """
-        # Call parent's __init__ first
-        super().__init__(plans, configuration, fold, dataset_json, device)
+    #     Calls parent initialization and then sets custom training parameters.
+    #     """
+    #     # Call parent's __init__ first
+    #     super().__init__(plans, configuration, fold, dataset_json, device)
 
-        # Override training hyperparameters
-        self.num_epochs = 110  # Change this to desired number of epochs (default: 1000)
+    #     # Override training hyperparameters
+    #     self.num_epochs = 500  # Change this to desired number of epochs (default: 1000)
 
-        print(f"\nCervical Attention Trainer initialized with {self.num_epochs} epochs")
+    #     print(f"\nCervical Attention Trainer initialized with {self.num_epochs} epochs")
 
     def initialize(self):
         # YOLO: Plan B (commented out)
@@ -85,7 +85,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             print(f"   Patch size: {original_patch_size} -> {edited_patch_size}")
 
         # well well well you can also edit batch size here too
-        self.configuration_manager.configuration['batch_size'] = 8
+        self.configuration_manager.configuration['batch_size'] = 32
 
         # Call parent initialization
         super().initialize()
