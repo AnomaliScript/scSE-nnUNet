@@ -73,10 +73,10 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             original_patch_size = self.configuration_manager.configuration['patch_size']
 
             # OPTION 1: Largest 64 x 64 x 128
-            edited_patch_size = [64, 64, 128]
+            # edited_patch_size = [64, 64, 128]
 
             # OPTION 2: Hard-set to 96³
-            # edited_patch_size = [96, 96, 96]
+            edited_patch_size = [96, 96, 96]
 
             # OPTION 3: Adjusted Anisotropic (follows spine anatomy)
             # edited_patch_size = [32, 32, 64]
@@ -566,28 +566,41 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         # Replace decoder's forward method
         network.decoder.forward = decoder_forward_with_bottleneck_decoder_attention
 
-        # Step 5: Replace encoder forward to inject attention after conv blocks
-        def encoder_forward_with_attention(x):
-            """
-            Modified encoder with attention after each conv block (before pooling).
+        # Step 5: ONLY replace encoder forward if encoder attention is enabled
+        if USE_ENCODER_ATTENTION and len(encoder_attention_modules) > 0:
+            def encoder_forward_with_attention(x):
+                """
+                Modified encoder with attention after each conv block (before pooling).
 
-            Standard encoder flow:
-                Input → Stage0 (conv) → Pool → Stage1 (conv) → Pool → ... → Bottleneck
+                CRITICAL: ResidualEncoder has a separate stem/initial conv that converts
+                1 channel → 32 channels BEFORE entering the stages. We must call this first!
 
-            With attention:
-                Input → Stage0 (conv) → Attention → Pool → Stage1 (conv) → Attention → Pool → ...
+                Standard encoder flow:
+                    Input → Stem (1→32 ch) → Stage0 → Pool → Stage1 → Pool → ... → Bottleneck
 
-            Args:
-                x: Input tensor
+                With attention:
+                    Input → Stem (1→32 ch) → Stage0 → Attention → Pool → Stage1 → Attention → Pool → ...
 
-            Returns:
-                skips: List of encoder outputs for decoder skip connections
-            """
+                Args:
+                    x: Input tensor (1 channel)
+
+                Returns:
+                    skips: List of encoder outputs for decoder skip connections
+                """
             skips = []
             faster_rcnn_model = getattr(network, 'faster_rcnn_model', None)
             attention_mask = getattr(network, 'current_attention_mask', None)
 
-            # Process each encoder stage
+            # CRITICAL FIX: Process stem/initial conv first (1 channel → 32 channels)
+            # The stem is NOT part of stages - it's a separate layer
+            # Try multiple possible attribute names for compatibility
+            if hasattr(network.encoder, 'conv_op'):
+                x = network.encoder.conv_op(x)
+            elif hasattr(network.encoder, 'stem'):
+                x = network.encoder.stem(x)
+            # If no separate stem exists, stages[0] handles it directly (fallback)
+
+            # Process each encoder stage (now x has 32+ channels)
             for s, stage in enumerate(network.encoder.stages):
                 x = stage(x)
 
@@ -608,10 +621,10 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
                     if hasattr(network.encoder, 'pools') and s < len(network.encoder.pools):
                         x = network.encoder.pools[s](x)
 
-            return skips
+                return skips
 
-        # Replace encoder's forward method
-        network.encoder.forward = encoder_forward_with_attention
+            # Replace encoder's forward method (only when encoder attention is enabled)
+            network.encoder.forward = encoder_forward_with_attention
 
         print("\nCervical Attention integration complete!")
         print(f"   Bottleneck attention: {'ENABLED' if bottleneck_attention else 'DISABLED'}")
