@@ -244,10 +244,6 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         Override to add class-weighted loss that penalizes C6/C7 errors more.
 
         Class weights:
-        - Background (0): 1.0 (standard)
-        - C1-C5 (1-5): 1.0 (standard)
-        - C6 (6): 2.0 (2x penalty for errors)
-        - C7 (7): 2.0 (2x penalty for errors)
 
         This helps the model focus on the most challenging vertebrae (C6/C7)
         which are often harder to segment due to proximity and anatomical variation.
@@ -264,12 +260,14 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         class_weights = torch.ones(num_classes, dtype=torch.float32, device=self.device)
         # C1-C2: Standard weight (easier anatomy - atlas/axis)
         # C3-C5: Moderate weight (mid-cervical - important but less challenging)
+        class_weights[1] = 2.0  # C1: 1.0x weight (standard)
+        class_weights[2] = 2.0  # C2: 1.0x weight
         class_weights[3] = 1.5  # C3: 1.5x weight
         class_weights[4] = 1.5  # C4: 1.5x weight
         class_weights[5] = 1.5  # C5: 1.5x weight
         # C6-C7: High weight (hardest to segment, most clinically critical)
-        class_weights[6] = 2.5  # C6: 2.5x weight (proximity to shoulders)
-        class_weights[7] = 2.5  # C7: 2.5x weight (most challenging)
+        class_weights[6] = 1.0  # C6: 2.5x weight (proximity to shoulders)
+        class_weights[7] = 1.0  # C7: 2.5x weight (most challenging)
 
         print(f"\nClass-weighted loss configured:")
         print(f"   C1-C2: 1.0x weight (standard - distinct anatomy)")
