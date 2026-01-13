@@ -270,9 +270,9 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
         class_weights[7] = 1.0  # C7: 2.5x weight (most challenging)
 
         print(f"\nClass-weighted loss configured:")
-        print(f"   C1-C2: 1.0x weight (standard - distinct anatomy)")
+        print(f"   C1-C2: 2.0x weight (standard - distinct anatomy)")
         print(f"   C3-C5: 1.5x weight (moderate - mid-cervical)")
-        print(f"   C6-C7: 2.5x weight (high - challenging + critical)")
+        print(f"   C6-C7: 1.0x weight (high - challenging + critical)")
         print(f"   Device: {self.device}")
 
         # Build DC + CE loss with class weights for CE component
