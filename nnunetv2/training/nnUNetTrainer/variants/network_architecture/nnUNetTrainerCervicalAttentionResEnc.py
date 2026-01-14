@@ -320,6 +320,11 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
     #     # Call parent's train_step with modified batch
     #     return super().train_step(batch)
 
+    def get_train_dataloader(self):
+        dl = super().get_train_dataloader()
+        dl.num_workers = 0
+        return dl
+
     @staticmethod
     def build_network_architecture(architecture_class_name: str,
                                    arch_init_kwargs: dict,
@@ -533,8 +538,18 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
                 # Upsample
                 x = network.decoder.transpconvs[s](lres_input)
 
+                # Match sizes before concatenation (handle odd dimensions)
+                skip = modified_skips[-(s+2)]
+                if x.shape[2:] != skip.shape[2:]:
+                    # Pad upsampled output to match skip size if needed
+                    pad_dims = []
+                    for dim_idx in range(2, len(x.shape)):  # spatial dims only
+                        diff = skip.shape[dim_idx] - x.shape[dim_idx]
+                        pad_dims = [0, diff] + pad_dims  # F.pad wants reversed order
+                    x = torch.nn.functional.pad(x, pad_dims)
+
                 # Concatenate with skip (potentially attended)
-                x = torch.cat((x, modified_skips[-(s+2)]), 1)
+                x = torch.cat((x, skip), 1)
 
                 # Decoder convolution block
                 x = network.decoder.stages[s](x)
