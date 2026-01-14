@@ -73,7 +73,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             original_patch_size = self.configuration_manager.configuration['patch_size']
 
             # OPTION 1: Largest 128 x 128 x 256
-            edited_patch_size = [216, 216, 216]
+            edited_patch_size = [180, 180, 180]
 
             # OPTION 2: Hard-set to 96³
             # edited_patch_size = [96, 96, 96]
@@ -85,7 +85,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             print(f"   Patch size: {original_patch_size} -> {edited_patch_size}")
 
         # well well well you can also edit batch size here too
-        self.configuration_manager.configuration['batch_size'] = 8
+        self.configuration_manager.configuration['batch_size'] = 12
 
         # Call parent initialization
         super().initialize()
