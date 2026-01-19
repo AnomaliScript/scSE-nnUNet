@@ -72,7 +72,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             # Get original patch size from configuration
             original_patch_size = self.configuration_manager.configuration['patch_size']
 
-            edited_patch_size = [64, 64, 64]   # Smaller patch size for cervical spine focus
+            edited_patch_size = [128, 128, 128]   # Smaller patch size for cervical spine focus
 
             self.configuration_manager.configuration['patch_size'] = edited_patch_size
             print(f"   Patch size: {original_patch_size} -> {edited_patch_size}")
