@@ -72,7 +72,7 @@ class nnUNetTrainerCervicalAttentionResEnc(nnUNetTrainer):
             # Get original patch size from configuration
             original_patch_size = self.configuration_manager.configuration['patch_size']
 
-            edited_patch_size = [175, 175, 175]
+            edited_patch_size = [172, 172, 172]
 
             self.configuration_manager.configuration['patch_size'] = edited_patch_size
             print(f"   Patch size: {original_patch_size} -> {edited_patch_size}")
